@@ -31,9 +31,29 @@ assert.deepEqual(activeIdentity, {
   chatId: "integrity-chat",
   hostChatId: "host-chat",
   integrity: "integrity-chat",
+  hostLineage: null,
   identitySource: "integrity",
   hasLikelySelectedChat: true,
 });
+
+const hostAliasedIdentity = resolveCurrentChatIdentityCore({
+  context: {
+    ...context,
+    chatMetadata: {
+      ...context.chatMetadata,
+      authority: {
+        conversationId: "conversation-stable",
+        branchId: "branch-stable",
+        revision: 3,
+        lastEventId: "commit-3",
+      },
+    },
+  },
+  resolveAliasByHostLineage: () => "persisted-by-host-lineage",
+});
+assert.equal(hostAliasedIdentity.chatId, "persisted-by-host-lineage");
+assert.equal(hostAliasedIdentity.identitySource, "host-lineage-alias");
+assert.equal(hostAliasedIdentity.hostLineage.hostRevision, 3);
 
 const aliasIdentity = resolveCurrentChatIdentityCore({
   context: { chatId: "host-only", chatMetadata: {}, characterId: "1" },

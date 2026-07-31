@@ -183,6 +183,15 @@ import {
   resolvePersistenceChatIdCore,
   resolveRuntimeGraphFallbackIdentityCore,
 } from "./runtime/identity-resolver.js";
+import {
+  areHostContextsInSameBranch,
+  buildHostTransactionFence,
+  captureHostTransactionContext,
+} from "./runtime/host-transaction-context.js";
+import {
+  inheritHostBranchGraph,
+  isSameHostLineage,
+} from "./runtime/host-branch-inheritance.js";
 import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
@@ -242,6 +251,7 @@ import {
   readLukerGraphSidecarV2,
   replaceLukerGraphJournalV2,
   resolveGraphIdentityAliasByHostChatId,
+  resolveGraphIdentityAliasByHostLineage,
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
@@ -647,6 +657,7 @@ function resolveCurrentChatIdentity(context = getContext()) {
     context,
     readGlobalCurrentChatId,
     resolveAliasByHostChatId: resolveGraphIdentityAliasByHostChatId,
+    resolveAliasByHostLineage: resolveGraphIdentityAliasByHostLineage,
     resolveIntegrity: getChatMetadataIntegrity,
     hasLikelySelectedChat: hasLikelySelectedChatContext,
   });
@@ -704,14 +715,25 @@ function rememberResolvedGraphIdentityAlias(
   persistenceChatId = getCurrentChatId(context),
 ) {
   const identity = resolveCurrentChatIdentity(context);
-  if (!identity.integrity || !persistenceChatId) {
+  if (
+    !persistenceChatId ||
+    (!identity.integrity &&
+      (!identity.hostLineage?.conversationId || !identity.hostLineage?.branchId))
+  ) {
     return null;
   }
+  const committedLineage =
+    Number(identity.hostLineage?.hostRevision || 0) > 0 &&
+    String(identity.hostLineage?.commitEventId || "").trim()
+      ? identity.hostLineage
+      : null;
 
   return rememberGraphIdentityAlias({
     integrity: identity.integrity,
     hostChatId: identity.hostChatId,
     persistenceChatId,
+    hostConversationId: committedLineage?.conversationId,
+    hostBranchId: committedLineage?.branchId,
   });
 }
 
@@ -725,6 +747,8 @@ function doesChatIdMatchResolvedGraphIdentity(
       integrity: identity?.integrity,
       hostChatId: identity?.hostChatId,
       persistenceChatId: identity?.chatId,
+      hostConversationId: identity?.hostLineage?.conversationId,
+      hostBranchId: identity?.hostLineage?.branchId,
     }),
   });
 }
@@ -740,6 +764,8 @@ function areChatIdsEquivalentForResolvedIdentity(
       integrity: identity?.integrity,
       hostChatId: identity?.hostChatId,
       persistenceChatId: identity?.chatId,
+      hostConversationId: identity?.hostLineage?.conversationId,
+      hostBranchId: identity?.hostLineage?.branchId,
     }),
   });
 }
@@ -2012,6 +2038,7 @@ const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
 const bmeIndexedDbRuntimeRepairInFlightByChatId = new Set();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
+const bmeHostBranchInheritanceInFlightByChatId = new Map();
 const bmeIndexedDbLocalStoreMigrationInFlightByChatId = new Map();
 const bmeIndexedDbOpfsMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
@@ -9612,6 +9639,192 @@ function deriveBranchGraphFromSourceGraph(
   return normalizeGraphRuntimeState(branchGraph, nextChatId);
 }
 
+async function ensureCurrentHostBranchGraphInheritance(
+  identity = resolveCurrentChatIdentity(getContext()),
+  sourceGraph = null,
+) {
+  const targetChatId = normalizeChatIdCandidate(identity?.chatId);
+  if (!targetChatId || !identity?.hostLineage?.parentConversationId) {
+    return { inherited: false, skipped: true, reason: "not-host-branch" };
+  }
+  const existing = bmeHostBranchInheritanceInFlightByChatId.get(targetChatId);
+  if (existing) return await existing;
+
+  const task = inheritHostBranchGraph({
+    identity,
+    currentChat: getContext()?.chat || [],
+    sourceGraph,
+    isCurrent: () => {
+      const currentIdentity = resolveCurrentChatIdentity(getContext());
+      return (
+        currentIdentity?.chatId === targetChatId &&
+        isSameHostLineage(currentIdentity?.hostLineage, identity.hostLineage)
+      );
+    },
+    isSourceGraphCompatible(graph, sourceChatId, parentLineage) {
+      if (!graph) return false;
+      const graphLineage = graph?.historyState?.hostLineage;
+      if (graphLineage?.conversationId && graphLineage?.branchId) {
+        return isSameHostLineage(graphLineage, parentLineage);
+      }
+      return normalizeChatIdCandidate(getGraphOwnedChatId(graph)) === sourceChatId;
+    },
+    async isTargetEmpty(chatId) {
+      const repository = ensureConversationRepository();
+      const targetDb = await repository?.getStoreForChat?.(chatId);
+      if (!targetDb || typeof targetDb.isEmpty !== "function") {
+        throw new Error("Host branch target store unavailable");
+      }
+      const status = await targetDb.isEmpty();
+      return status?.empty === true;
+    },
+    async loadSourceGraph(sourceChatId) {
+      const repository = ensureConversationRepository();
+      const sourceDb = await repository?.getStoreForChat?.(sourceChatId);
+      if (!sourceDb || typeof sourceDb.exportSnapshot !== "function") return null;
+      const snapshot = await sourceDb.exportSnapshot({
+        includeTombstones: true,
+        allowCrossLineageRead: true,
+      });
+      return buildGraphFromSnapshot(snapshot, { chatId: sourceChatId });
+    },
+    deriveBranchGraph: deriveBranchGraphFromSourceGraph,
+    async persistBranchGraph(branchGraph, branchContext) {
+      const repository = ensureConversationRepository();
+      const targetDb = await repository?.getStoreForChat?.(branchContext.targetChatId);
+      if (!targetDb || typeof targetDb.importSnapshot !== "function") {
+        return { accepted: false, saved: false, reason: "target-store-unavailable" };
+      }
+      const lineage = branchContext.lineage;
+      const snapshot = buildSnapshotFromGraph(branchGraph, {
+        chatId: branchContext.targetChatId,
+        revision: 1,
+        meta: {
+          hostConversationId: lineage.conversationId,
+          hostBranchId: lineage.branchId,
+          hostRevision: lineage.hostRevision,
+          hostCommitEventId: lineage.commitEventId || "",
+          hostCommitTransactionId: lineage.commitTransactionId || "",
+          branchParentConversationId: branchContext.parentLineage.conversationId,
+          branchParentBranchId: branchContext.parentLineage.branchId,
+          branchParentRevision: branchContext.parentLineage.hostRevision,
+          branchParentPersistenceChatId: branchContext.sourceChatId,
+          branchInheritedAt: new Date().toISOString(),
+        },
+      });
+      const authorityTarget = isAuthorityGraphStorePresentation(
+        resolveDbGraphStorePresentation(targetDb),
+      );
+      let imported = null;
+      if (authorityTarget && typeof targetDb.commitDelta === "function") {
+        const runtimeMetaPatch = {
+          ...(snapshot.meta || {}),
+          ...(snapshot.state || {}),
+        };
+        for (const key of [
+          "revision",
+          "lastModified",
+          "lastMutationReason",
+          "syncDirty",
+          "syncDirtyReason",
+          "nodeCount",
+          "edgeCount",
+          "tombstoneCount",
+        ]) {
+          delete runtimeMetaPatch[key];
+        }
+        imported = await targetDb.commitDelta(
+          {
+            upsertNodes: snapshot.nodes || [],
+            upsertEdges: snapshot.edges || [],
+            tombstones: snapshot.tombstones || [],
+            deleteNodeIds: [],
+            deleteEdgeIds: [],
+            runtimeMetaPatch,
+          },
+          {
+            baseRevision: 0,
+            reason: "host-branch-inherited",
+            markSyncDirty: true,
+            vectorDirtyHint: true,
+            hostContext: captureHostTransactionContext({ context: getContext() }),
+            idempotencyKey: [
+              "host-branch-inherit",
+              lineage.conversationId,
+              lineage.branchId,
+              branchContext.sourceChatId,
+            ].join(":"),
+          },
+        );
+      } else {
+        imported = await targetDb.importSnapshot(snapshot, {
+          mode: "replace",
+          expectedRevision: 0,
+          markSyncDirty: true,
+        });
+      }
+      const persistedSnapshot = await targetDb.exportSnapshot({
+        includeTombstones: true,
+      });
+      if (!authorityTarget) {
+        cacheIndexedDbSnapshot(branchContext.targetChatId, persistedSnapshot);
+      }
+      const revision = Number(
+        imported?.revision || persistedSnapshot?.meta?.revision || 0,
+      );
+      const storageTier = String(
+        persistedSnapshot?.meta?.storagePrimary ||
+          persistedSnapshot?.meta?.storageMode ||
+          "local",
+      );
+      return {
+        accepted: true,
+        saved: true,
+        revision,
+        storageTier,
+      };
+    },
+    async rememberIdentityAlias(persistenceChatId, lineage, committed = {}) {
+      rememberGraphIdentityAlias({
+        integrity: identity.integrity,
+        hostChatId: identity.hostChatId,
+        persistenceChatId,
+        hostConversationId: lineage.conversationId,
+        hostBranchId: lineage.branchId,
+      });
+      if (committed.stillCurrent && committed.persistence?.saved !== false) {
+        persistGraphCommitMarker(getContext(), {
+          reason: "host-branch-inherited",
+          revision: Number(committed.persistence?.revision || 0),
+          storageTier: String(committed.persistence?.storageTier || "local"),
+          accepted: true,
+          graph: committed.branchGraph,
+          chatId: persistenceChatId,
+          immediate: true,
+        });
+      }
+    },
+  });
+
+  bmeHostBranchInheritanceInFlightByChatId.set(targetChatId, task);
+  try {
+    return await task;
+  } catch (error) {
+    console.warn("[ST-BME] Host branch memory inheritance deferred:", error);
+    return {
+      inherited: false,
+      skipped: false,
+      reason: "host-branch-inheritance-failed",
+      targetChatId,
+      error: error?.message || String(error),
+    };
+  } finally {
+    if (bmeHostBranchInheritanceInFlightByChatId.get(targetChatId) === task) {
+      bmeHostBranchInheritanceInFlightByChatId.delete(targetChatId);
+    }
+  }
+}
+
 async function readPersistedGraphForChatStateTarget(
   context = getContext(),
   chatStateTarget = null,
@@ -11908,6 +12121,16 @@ function ensureCurrentGraphRuntimeState({ chatId = getCurrentChatId() } = {}) {
   }
 
   conversationWorkspace.graph = normalizeGraphRuntimeState(conversationWorkspace.graph, chatId);
+  const activeLineage = resolveCurrentChatIdentity(getContext())?.hostLineage || null;
+  const persistedLineage = conversationWorkspace.graph?.historyState?.hostLineage || null;
+  if (
+    activeLineage &&
+    (!persistedLineage || isSameHostLineage(activeLineage, persistedLineage))
+  ) {
+    conversationWorkspace.graph.historyState.hostLineage = {
+      ...activeLineage,
+    };
+  }
   return conversationWorkspace.graph;
 }
 
@@ -13846,10 +14069,15 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
         resolveConcurrencyConfig(settings).mode ||
         "balanced",
     ).trim() || "balanced";
+  const hostLineage = resolveCurrentChatIdentity(getContext())?.hostLineage || null;
+  const historyFingerprint = buildChatHistoryFingerprint(getContext()?.chat || []);
   const coalesced = backgroundVectorSyncCoalescer.enqueue({
     ...normalizedTask,
     chatId,
     modelScope: getVectorModelScope(config),
+    hostConversationId: String(hostLineage?.conversationId || ""),
+    hostBranchId: String(hostLineage?.branchId || ""),
+    historyFingerprint,
     mode,
     reason:
       String(normalizedTask.reason || "background-vector-sync").trim() ||
@@ -13875,8 +14103,23 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
     async () => {
       backgroundVectorSyncCoalescer.start(scheduledTask);
       try {
-        const activeChatId = normalizeChatIdCandidate(getCurrentChatId());
-        if (backgroundVectorSyncCoalescer.isStale(scheduledTask, activeChatId)) {
+        const buildCurrentVectorTaskScope = () => {
+          const currentIdentity = resolveCurrentChatIdentity(getContext());
+          return {
+            chatId: normalizeChatIdCandidate(currentIdentity?.chatId),
+            hostConversationId: String(
+              currentIdentity?.hostLineage?.conversationId || "",
+            ),
+            hostBranchId: String(currentIdentity?.hostLineage?.branchId || ""),
+            historyFingerprint: buildChatHistoryFingerprint(getContext()?.chat || []),
+          };
+        };
+        if (
+          backgroundVectorSyncCoalescer.isStale(
+            scheduledTask,
+            buildCurrentVectorTaskScope(),
+          )
+        ) {
           return { skipped: true, reason: "stale-background-vector-sync" };
         }
         const silentConsolidationSync =
@@ -13894,12 +14137,11 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
           expectedChatId: scheduledTask.chatId,
           silentStatus: silentConsolidationSync,
         });
-        const completedChatId = normalizeChatIdCandidate(getCurrentChatId());
         if (
           result?.stale ||
           backgroundVectorSyncCoalescer.isStale(
             scheduledTask,
-            completedChatId,
+            buildCurrentVectorTaskScope(),
           )
         ) {
           return { skipped: true, reason: "stale-background-vector-sync" };
@@ -15097,27 +15339,25 @@ function inspectHistoryMutation(
       Number.isFinite(metaDetection?.floor) &&
       metaDetection.floor <= lastProcessedFloor
         ? metaDetection.floor
-        : !Number.isFinite(metaDetection?.floor) && lastProcessedFloor >= 0
-          ? 0
-          : null;
+        : null;
     if (Number.isFinite(migrationDirtyFloor)) {
-      const migrationReason = metaDetection
-        ? metaReason
-        : `${trigger} 发生在历史哈希升级期间，执行保守恢复`;
+      // v3 content hashes are not stable enough to choose re-extraction, but
+      // an explicit delete/swipe/reroll event remains trustworthy structural
+      // evidence and must not be swallowed by the one-time v4 rebind.
       clearInjectionState();
       markHistoryDirty(
         conversationWorkspace.graph,
         migrationDirtyFloor,
-        migrationReason,
-        metaDetection?.source || "hash-version-migration",
+        metaReason,
+        metaDetection.source || "processed-message-identity-migration",
       );
-      persistHistoryDirtyCheckpoint("history-dirty-hash-version-migration");
-      notifyHistoryDirty(migrationDirtyFloor, migrationReason);
+      persistHistoryDirtyCheckpoint("history-dirty-identity-migration");
+      notifyHistoryDirty(migrationDirtyFloor, metaReason);
       return {
         dirty: true,
         earliestAffectedFloor: migrationDirtyFloor,
-        reason: migrationReason,
-        source: metaDetection?.source || "hash-version-migration",
+        reason: metaReason,
+        source: metaDetection.source || "processed-message-identity-migration",
       };
     }
     rebindProcessedHistoryStateToChat(
@@ -15126,7 +15366,7 @@ function inspectHistoryMutation(
       getAssistantTurns(chat),
     );
     console.debug?.(
-      "[ST-BME] refreshed processed message hashes after hash-version migration",
+      "[ST-BME] refreshed stable processed-message records after migration",
       {
         trigger,
         lastProcessedAssistantFloor:
@@ -15134,7 +15374,7 @@ function inspectHistoryMutation(
       },
     );
     if (isGraphMetadataWriteAllowed()) {
-      saveGraphToChat({ reason: "processed-hash-version-migrated" });
+      saveGraphToChat({ reason: "processed-message-identity-migrated" });
     }
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
   }
@@ -15259,6 +15499,7 @@ async function executeExtractionBatch({
       appendBatchJournal,
       applyProcessedHistorySnapshotToGraph,
       buildChatHistoryFingerprint,
+      buildHostTransactionFence,
       buildPersistDelta,
       buildExtractionMessages,
       cloneGraphSnapshot,
@@ -15269,6 +15510,8 @@ async function executeExtractionBatch({
       createBatchStatusSkeleton,
       captureConversationLease: (...args) =>
         conversationWorkspace.captureLease(...args),
+      captureHostTransactionContext: () =>
+        captureHostTransactionContext({ context: getContext() }),
       ensureCurrentGraphRuntimeState,
       extractMemories,
       finalizeBatchStatus,
@@ -15285,6 +15528,7 @@ async function executeExtractionBatch({
       isAbortError,
       isConversationLeaseCurrent: (...args) =>
         conversationWorkspace.isLeaseCurrent(...args),
+      areHostContextsInSameBranch,
       markHistoryDirty,
       persistExtractionBatchResult,
       resolveCurrentChatStateTarget,
@@ -16308,7 +16552,9 @@ function onChatChanged() {
   abortGraphStewardWorkers("chat-changed");
   conversationWorkspace.hostGeneration.running = false;
   conversationWorkspace.hostGeneration.endedAt = 0;
-  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
+  const sourceGraph = conversationWorkspace.graph;
+  const identity = resolveCurrentChatIdentity();
+  conversationWorkspace.enterChat(identity, {
     forceNewEpoch: true,
     reason: "chat-changed",
   });
@@ -16357,6 +16603,7 @@ function onChatChanged() {
   });
 
   scheduleBmeIndexedDbTask(async () => {
+    await ensureCurrentHostBranchGraphInheritance(identity, sourceGraph);
     const syncResult = await syncConversationRepositoryWithCurrentChat("chat-changed");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-changed", syncResult.chatId);
@@ -16378,7 +16625,9 @@ function onChatChanged() {
 function onChatLoaded() {
   enaPlannerApi?.cancelPlanning?.("chat-loaded");
   abortGraphStewardWorkers("chat-loaded");
-  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
+  const sourceGraph = conversationWorkspace.graph;
+  const identity = resolveCurrentChatIdentity();
+  conversationWorkspace.enterChat(identity, {
     reason: "chat-loaded",
   });
   const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
@@ -16393,6 +16642,7 @@ function onChatLoaded() {
   });
 
   scheduleBmeIndexedDbTask(async () => {
+    await ensureCurrentHostBranchGraphInheritance(identity, sourceGraph);
     const syncResult = await syncConversationRepositoryWithCurrentChat("chat-loaded");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-loaded", syncResult.chatId);
@@ -16409,6 +16659,41 @@ function onChatLoaded() {
   }
 
   return result;
+}
+
+function onAuthorityHostCommitted() {
+  const identity = resolveCurrentChatIdentity(getContext());
+  const entered = conversationWorkspace.enterChat(identity, {
+    reason: "authority-host-committed",
+  });
+  const lineage = identity?.hostLineage || null;
+  if (
+    lineage &&
+    conversationWorkspace.graph?.historyState &&
+    (!conversationWorkspace.graph.historyState.chatId ||
+      conversationWorkspace.graph.historyState.chatId === identity.chatId)
+  ) {
+    conversationWorkspace.graph.historyState.hostLineage = {
+      ...lineage,
+    };
+    rememberResolvedGraphIdentityAlias(getContext(), identity.chatId);
+  }
+  if (entered.changed) {
+    scheduleBmeIndexedDbTask(async () => {
+      await ensureCurrentHostBranchGraphInheritance(identity, null);
+      const syncResult = await syncConversationRepositoryWithCurrentChat(
+        "authority-host-committed",
+      );
+      if (syncResult?.chatId) {
+        await loadGraphFromIndexedDb(syncResult.chatId, {
+          source: "authority-host-committed",
+          allowOverride: true,
+          applyEmptyState: true,
+        });
+      }
+    });
+  }
+  return lineage;
 }
 
 function onMessageSent(messageId) {
@@ -18259,6 +18544,7 @@ async function onCompactLukerSidecar() {
       getCoreEventBindingState,
       handlers: {
         onBeforeCombinePrompts,
+        onAuthorityHostCommitted,
         onCharacterMessageRendered,
         onChatBranchCreated,
         onChatChanged,

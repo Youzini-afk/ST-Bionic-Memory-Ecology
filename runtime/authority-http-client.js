@@ -1,4 +1,8 @@
 import { normalizeAuthorityBaseUrl } from "./authority-capabilities.js";
+import {
+  captureHostTransactionContext,
+  normalizeHostTransactionContext,
+} from "./host-transaction-context.js";
 
 export const AUTHORITY_PROTOCOL_AUTO = "auto";
 export const AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06 = "server-plugin-v06";
@@ -250,7 +254,7 @@ export class AuthorityHttpClient {
    * Invoke a companion module transaction via the generic DOA module host.
    *
    * POST /modules/:moduleId/transactions/:transactionName with a session
-   * and an envelope body `{ input, idempotencyKey?, options? }`. The
+   * and an envelope body `{ input, idempotencyKey?, options?, host? }`. The
    * `idempotencyKey` is pulled from `options.idempotencyKey` OR from
    * `input.idempotencyKey` if present, so callers that already embed the
    * key inside their payload do not need to pass it separately.
@@ -270,10 +274,17 @@ export class AuthorityHttpClient {
     const idempotencyKey = typeof options.idempotencyKey === "string" && options.idempotencyKey.trim()
       ? options.idempotencyKey.trim()
       : (typeof input?.idempotencyKey === "string" && input.idempotencyKey.trim() ? input.idempotencyKey.trim() : undefined);
+    const hostContext = options.hostContext === null
+      ? null
+      : normalizeHostTransactionContext(options.hostContext) ||
+        captureHostTransactionContext({
+          context: globalThis.SillyTavern?.getContext?.() || null,
+        });
     const body = {
       input: input ?? {},
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
       ...(options.dryRun === true ? { options: { dryRun: true } } : {}),
+      ...(hostContext ? { host: hostContext } : {}),
     };
     return await this.requestJson(path, {
       method: "POST",

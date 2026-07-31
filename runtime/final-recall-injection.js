@@ -1,7 +1,13 @@
 import {
+  BME_RECALL_VERSION,
   buildRecallHistoryFingerprint,
   validatePersistedRecallForUserMessage,
 } from "../retrieval/recall-persistence.js";
+import {
+  buildHostLineage,
+  captureHostTransactionContext,
+  getMessageUid,
+} from "./host-transaction-context.js";
 
 export function createFinalRecallInjection(deps = {}) {
   const normalizeRecallInputText = (value = "") =>
@@ -39,6 +45,9 @@ export function createFinalRecallInjection(deps = {}) {
       chat,
       targetUserMessageIndex,
     );
+    const hostLineage = buildHostLineage(
+      captureHostTransactionContext({ context: getContext() }),
+    );
     const record = deps.buildPersistedRecallRecord(
       {
         ...payload,
@@ -47,6 +56,11 @@ export function createFinalRecallInjection(deps = {}) {
           chat,
           targetUserMessageIndex,
         ),
+        messageUid: getMessageUid(chat[targetUserMessageIndex]),
+        conversationId: hostLineage?.conversationId || "",
+        branchId: hostLineage?.branchId || "",
+        hostRevision: Number(hostLineage?.hostRevision || 0),
+        hostEventId: hostLineage?.commitEventId || "",
       },
       existingRecord,
     );
@@ -273,10 +287,21 @@ export function createFinalRecallInjection(deps = {}) {
     const existingBoundUserFloorText = normalizeRecallInputText(
       existingRecord?.boundUserFloorText || "",
     );
+    const currentMessageUid = getMessageUid(chat[targetUserMessageIndex]);
+    const currentHostLineage = buildHostLineage(
+      captureHostTransactionContext({ context: getContext() }),
+    );
     const existingMetadataUpToDate =
+      Number(existingRecord?.version || 0) === BME_RECALL_VERSION &&
       Boolean(existingRecord?.authoritativeInputUsed) === nextAuthoritativeInputUsed &&
       existingBoundUserFloorText === targetUserFloorText &&
-      String(existingRecord?.historyFingerprint || "") === nextHistoryFingerprint;
+      String(existingRecord?.historyFingerprint || "") === nextHistoryFingerprint &&
+      (!currentMessageUid || String(existingRecord?.messageUid || "") === currentMessageUid) &&
+      (!currentHostLineage?.conversationId ||
+        String(existingRecord?.conversationId || "") ===
+          currentHostLineage.conversationId) &&
+      (!currentHostLineage?.branchId ||
+        String(existingRecord?.branchId || "") === currentHostLineage.branchId);
     const existingValidation = validatePersistedRecallForUserMessage(
       chat,
       targetUserMessageIndex,

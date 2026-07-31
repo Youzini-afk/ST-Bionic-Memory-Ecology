@@ -363,7 +363,18 @@ export function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, cha
   meta = meta && typeof meta === "object" ? meta : {};
 
   const candidates = [];
-  const isDeleteTrigger = String(trigger || "").includes("message-deleted");
+  const normalizedTrigger = String(trigger || "").toLowerCase();
+  const isDeleteTrigger = normalizedTrigger.includes("message-deleted");
+  const isStructuralTrigger =
+    isDeleteTrigger ||
+    normalizedTrigger.includes("message-swiped") ||
+    normalizedTrigger.includes("swipe-deleted") ||
+    normalizedTrigger.includes("reroll") ||
+    normalizedTrigger.includes("branch");
+  // Edits and post-generation enrichment are not automatic rollback policy.
+  // Stable-message inspection below still catches deletions/reorders, while
+  // users retain control over whether changed semantics should be re-extracted.
+  if (!isStructuralTrigger) return null;
   const minExtractableFloor = getMinExtractableAssistantFloor(chat);
 
   // ST 的 delete primaryArg 是删除后的 chat.length，不能当作删除起点；

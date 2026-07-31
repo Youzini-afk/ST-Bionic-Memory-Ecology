@@ -2,9 +2,14 @@
 
 import { resolveGenerationParentUserFloor } from "../runtime/conversation-session.js";
 import { stableHashString } from "../runtime/runtime-state.js";
+import {
+  buildHostLineage,
+  captureHostTransactionContext,
+  getMessageUid,
+} from "../runtime/host-transaction-context.js";
 
 export const BME_RECALL_EXTRA_KEY = "bme_recall";
-export const BME_RECALL_VERSION = 3;
+export const BME_RECALL_VERSION = 4;
 
 export const BME_RECALL_STATUS = Object.freeze({
   READY: "ready",
@@ -83,6 +88,35 @@ export function validatePersistedRecallForUserMessage(
     recordVersion > BME_RECALL_VERSION
   ) {
     return { valid: false, reason: "unsupported-recall-version", record };
+  }
+
+  const currentMessageUid = getMessageUid(targetMessage);
+  const storedMessageUid = String(record.messageUid || "").trim();
+  if (
+    storedMessageUid &&
+    currentMessageUid &&
+    storedMessageUid !== currentMessageUid
+  ) {
+    return { valid: false, reason: "message-uid-mismatch", record };
+  }
+  const currentLineage = buildHostLineage(
+    captureHostTransactionContext({
+      context: globalThis.SillyTavern?.getContext?.() || null,
+    }),
+  );
+  if (
+    record.conversationId &&
+    currentLineage?.conversationId &&
+    String(record.conversationId) !== currentLineage.conversationId
+  ) {
+    return { valid: false, reason: "conversation-mismatch", record };
+  }
+  if (
+    record.branchId &&
+    currentLineage?.branchId &&
+    String(record.branchId) !== currentLineage.branchId
+  ) {
+    return { valid: false, reason: "branch-mismatch", record };
   }
 
   const currentFloorText = normalizeBoundUserFloorText(targetMessage.mes || "");
@@ -170,6 +204,13 @@ export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
     turnId: String(record.turnId || ""),
     inputFingerprint: String(record.inputFingerprint || ""),
     memoryStateFingerprint: String(record.memoryStateFingerprint || ""),
+    messageUid: String(record.messageUid || ""),
+    conversationId: String(record.conversationId || ""),
+    branchId: String(record.branchId || ""),
+    hostRevision: Number.isFinite(Number(record.hostRevision))
+      ? Math.max(0, Math.floor(Number(record.hostRevision)))
+      : 0,
+    hostEventId: String(record.hostEventId || ""),
   };
 }
 
@@ -222,6 +263,13 @@ export function buildPersistedRecallRecord(payload = {}, existingRecord = null) 
     turnId: String(payload.turnId || ""),
     inputFingerprint: String(payload.inputFingerprint || ""),
     memoryStateFingerprint: String(payload.memoryStateFingerprint || ""),
+    messageUid: String(payload.messageUid || previous.messageUid || ""),
+    conversationId: String(payload.conversationId || previous.conversationId || ""),
+    branchId: String(payload.branchId || previous.branchId || ""),
+    hostRevision: Number.isFinite(Number(payload.hostRevision))
+      ? Math.max(0, Math.floor(Number(payload.hostRevision)))
+      : Math.max(0, Math.floor(Number(previous.hostRevision) || 0)),
+    hostEventId: String(payload.hostEventId || previous.hostEventId || ""),
   };
 }
 

@@ -1430,7 +1430,10 @@ async function testMergeRuntimeMetaPolicies() {
           1: "h1",
           2: "h2",
           3: "h3",
-          4: "local-h4",
+          4: {
+            messageHash: "local-h4",
+            messageUid: "local-message-4",
+          },
           6: "h6",
         },
       },
@@ -1484,7 +1487,10 @@ async function testMergeRuntimeMetaPolicies() {
           1: "h1",
           2: "h2",
           3: "h3",
-          4: "remote-h4",
+          4: {
+            messageHash: "remote-h4",
+            messageUid: "remote-message-4",
+          },
           5: "h5",
         },
       },
@@ -1525,11 +1531,11 @@ async function testMergeRuntimeMetaPolicies() {
 
   const merged = mergeSnapshots(local, remote, { chatId: "chat-merge-meta" });
 
-  assert.equal(merged.state.lastProcessedFloor, 3, "冲突哈希楼层应触发保守回退");
+  assert.equal(merged.state.lastProcessedFloor, 3, "稳定消息身份冲突应触发保守回退");
   assert.equal(merged.state.extractionCount, 7);
   assert.deepEqual(Object.keys(merged.meta.runtimeHistoryState.processedMessageHashes), ["1", "2", "3"]);
   assert.equal(merged.meta.runtimeHistoryState.historyDirtyFrom, 4);
-  assert.ok(String(merged.meta.runtimeHistoryState.lastMutationReason).includes("processed-hash-conflict@4"));
+  assert.ok(String(merged.meta.runtimeHistoryState.lastMutationReason).includes("processed-identity-conflict@4"));
   assert.equal(merged.meta.runtimeVectorIndexState.nodeToHash["node-a"], undefined);
   assert.equal(merged.meta.runtimeVectorIndexState.nodeToHash["node-b"], "hash-shared-b");
   assert.equal(merged.meta.runtimeVectorIndexState.hashToNodeId["hash-local-a"], undefined);
@@ -1549,6 +1555,46 @@ async function testMergeRuntimeMetaPolicies() {
   assert.equal(merged.meta.timelineState.activeSegmentId, "remote-segment");
   assert.equal(merged.meta.runtimeLastProcessedSeq, 9);
   assert.equal(merged.meta.runtimeGraphVersion, 11);
+
+  const hashDriftOnly = mergeSnapshots(
+    {
+      meta: {
+        chatId: "chat-hash-evidence-only",
+        revision: 1,
+        runtimeHistoryState: {
+          chatId: "chat-hash-evidence-only",
+          lastProcessedAssistantFloor: 1,
+          processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+          processedMessageHashes: {
+            1: { messageHash: "hash-before", messageUid: "message-stable" },
+          },
+        },
+      },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+    },
+    {
+      meta: {
+        chatId: "chat-hash-evidence-only",
+        revision: 2,
+        runtimeHistoryState: {
+          chatId: "chat-hash-evidence-only",
+          lastProcessedAssistantFloor: 1,
+          processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+          processedMessageHashes: {
+            1: { messageHash: "hash-after", messageUid: "message-stable" },
+          },
+        },
+      },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+    },
+    { chatId: "chat-hash-evidence-only" },
+  );
+  assert.equal(hashDriftOnly.state.lastProcessedFloor, 1);
+  assert.equal(hashDriftOnly.meta.runtimeHistoryState.historyDirtyFrom, null);
+  assert.equal(
+    hashDriftOnly.meta.runtimeHistoryState.processedMessageHashes[1].messageHash,
+    "hash-after",
+  );
 }
 
 async function testManualCloudModeGuards() {
@@ -1579,6 +1625,18 @@ async function testManualCloudModeGuards() {
 async function testManualBackupAndRestoreFlow() {
   const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
   const dbByChatId = new Map();
+  const processedMessageHashes = Object.fromEntries(
+    Array.from({ length: 5 }, (_, floor) => [
+      floor,
+      {
+        messageHash: `hash-${floor}`,
+        messageUid: `message-${floor}`,
+        swipeUid: "",
+        swipeIndex: null,
+        role: floor % 2 === 0 ? "assistant" : "user",
+      },
+    ]),
+  );
   const db = new FakeDb("chat-backup-flow", {
     meta: {
       schemaVersion: 1,
@@ -1594,13 +1652,7 @@ async function testManualBackupAndRestoreFlow() {
         lastProcessedAssistantFloor: 4,
         extractionCount: 2,
         processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
-        processedMessageHashes: {
-          0: "hash-0",
-          1: "hash-1",
-          2: "hash-2",
-          3: "hash-3",
-          4: "hash-4",
-        },
+        processedMessageHashes,
         processedMessageHashesNeedRefresh: false,
         historyDirtyFrom: 2,
         lastMutationReason: "hash-recheck",
@@ -1686,13 +1738,7 @@ async function testManualBackupAndRestoreFlow() {
   );
   assert.deepEqual(
     backupPayload.snapshot.meta.runtimeHistoryState.processedMessageHashes,
-    {
-      0: "hash-0",
-      1: "hash-1",
-      2: "hash-2",
-      3: "hash-3",
-      4: "hash-4",
-    },
+    processedMessageHashes,
   );
   assert.equal(
     backupPayload.snapshot.meta.runtimeHistoryState.processedMessageHashesNeedRefresh,

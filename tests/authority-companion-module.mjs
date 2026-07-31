@@ -125,6 +125,7 @@ function createMockSqlTxCtx(options = {}) {
     vectorDirtyRows = [],
     idempotencyCache = new Map(),
     transactionDelayMs = 0,
+    host = null,
   } = options;
   const calls = {
     query: [],
@@ -260,6 +261,7 @@ function createMockSqlTxCtx(options = {}) {
       transactionVersion: '1',
       callerExtensionId: 'third-party/test-extension',
       requestId: 'test-req-graph-1',
+      host,
       limits: { maxRequestBytes: 67108864, maxResponseBytes: 67108864, timeoutMs: 120000, source: 'manifest' },
       logger: { info() {}, warn() {}, error() {} },
       audit: { logUsage: async () => {}, logWarning: async () => {}, logError: async () => {} },
@@ -531,7 +533,7 @@ async function run() {
     // graph.getHead declaration
     assert.strictEqual(manifest.transactions['graph.getHead'].idempotency, 'none', 'graph.getHead idempotency must be none');
     assert.strictEqual(manifest.transactions['graph.getHead'].riskLevel, 'low', 'graph.getHead riskLevel must be low');
-    assert.strictEqual(manifest.transactions['graph.getHead'].version, '1', 'graph.getHead version must be "1"');
+    assert.strictEqual(manifest.transactions['graph.getHead'].version, '2', 'graph.getHead version must be "2"');
     assert.strictEqual(manifest.transactions['graph.getHead'].timeoutMs, 120000, 'graph.getHead timeoutMs must be 120000');
     assert.strictEqual(manifest.transactions['graph.getHead'].maxRequestBytes, 67108864, 'graph.getHead maxRequestBytes must be 64 MiB');
     assert.strictEqual(manifest.transactions['graph.getHead'].maxResponseBytes, 67108864, 'graph.getHead maxResponseBytes must be 64 MiB');
@@ -546,7 +548,7 @@ async function run() {
     // graph.loadSnapshot declaration
     assert.strictEqual(manifest.transactions['graph.loadSnapshot'].idempotency, 'none', 'graph.loadSnapshot idempotency must be none');
     assert.strictEqual(manifest.transactions['graph.loadSnapshot'].riskLevel, 'low', 'graph.loadSnapshot riskLevel must be low');
-    assert.strictEqual(manifest.transactions['graph.loadSnapshot'].version, '1', 'graph.loadSnapshot version must be "1"');
+    assert.strictEqual(manifest.transactions['graph.loadSnapshot'].version, '2', 'graph.loadSnapshot version must be "2"');
     assert.strictEqual(manifest.transactions['graph.loadSnapshot'].timeoutMs, 120000, 'graph.loadSnapshot timeoutMs must be 120000');
     assert.strictEqual(manifest.transactions['graph.loadSnapshot'].maxRequestBytes, 67108864, 'graph.loadSnapshot maxRequestBytes must be 64 MiB');
     assert.strictEqual(manifest.transactions['graph.loadSnapshot'].maxResponseBytes, 67108864, 'graph.loadSnapshot maxResponseBytes must be 64 MiB');
@@ -562,7 +564,7 @@ async function run() {
     assert.ok(manifest.transactions['graph.commitDelta'], 'must declare graph.commitDelta');
     assert.strictEqual(manifest.transactions['graph.commitDelta'].idempotency, 'required', 'graph.commitDelta idempotency must be required');
     assert.strictEqual(manifest.transactions['graph.commitDelta'].riskLevel, 'high', 'graph.commitDelta riskLevel must be high');
-    assert.strictEqual(manifest.transactions['graph.commitDelta'].version, '1', 'graph.commitDelta version must be "1"');
+    assert.strictEqual(manifest.transactions['graph.commitDelta'].version, '2', 'graph.commitDelta version must be "2"');
     assert.strictEqual(manifest.transactions['graph.commitDelta'].timeoutMs, 120000, 'graph.commitDelta timeoutMs must be 120000');
     assert.strictEqual(manifest.transactions['graph.commitDelta'].maxRequestBytes, 67108864, 'graph.commitDelta maxRequestBytes must be 64 MiB');
     assert.strictEqual(manifest.transactions['graph.commitDelta'].maxResponseBytes, 67108864, 'graph.commitDelta maxResponseBytes must be 64 MiB');
@@ -576,7 +578,7 @@ async function run() {
     );
     assert.strictEqual(manifest.transactions['extraction.commitBatch'].idempotency, 'required', 'extraction.commitBatch idempotency must be required');
     assert.strictEqual(manifest.transactions['extraction.commitBatch'].riskLevel, 'high', 'extraction.commitBatch riskLevel must be high');
-    assert.strictEqual(manifest.transactions['extraction.commitBatch'].version, '1', 'extraction.commitBatch version must be "1"');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].version, '2', 'extraction.commitBatch version must be "2"');
     assert.strictEqual(manifest.transactions['extraction.commitBatch'].timeoutMs, 120000, 'extraction.commitBatch timeoutMs must be 120000');
     assert.strictEqual(manifest.transactions['extraction.commitBatch'].maxRequestBytes, 67108864, 'extraction.commitBatch maxRequestBytes must be 64 MiB');
     assert.strictEqual(manifest.transactions['extraction.commitBatch'].maxResponseBytes, 67108864, 'extraction.commitBatch maxResponseBytes must be 64 MiB');
@@ -1077,7 +1079,7 @@ async function run() {
     assert.deepStrictEqual(result.result.nodes, []);
     assert.deepStrictEqual(result.result.edges, []);
     assert.deepStrictEqual(result.result.tombstones, []);
-    assert.deepStrictEqual(result.result.state, { lastProcessedFloor: 0, extractionCount: 0 });
+    assert.deepStrictEqual(result.result.state, { lastProcessedFloor: -1, extractionCount: 0 });
   }
 
   console.log('[test:authority-companion-module] testing graph.loadSnapshot respects explicit database');
@@ -1224,6 +1226,100 @@ async function run() {
   }
 
   console.log('[test:authority-companion-module] testing extraction.commitBatch CAS conflict no transaction');
+
+  console.log('[test:authority-companion-module] testing extraction.commitBatch host lineage + stable message identity');
+  {
+    const host = {
+      schemaVersion: 1,
+      phase: 'snapshot',
+      conversationId: 'conversation-batch',
+      branchId: 'branch-batch',
+      hostRevision: 8,
+      baseHostRevision: 7,
+      commitEventId: 'host-commit-8',
+      capturedAt: '2026-08-01T00:00:00.000Z',
+    };
+    const { calls, ctx } = createMockSqlTxCtx({
+      meta: { revision: 2 },
+      host,
+    });
+    ctx.transactionName = 'extraction.commitBatch';
+    const input = buildCommitBatchInput({
+      hostTransaction: {
+        schemaVersion: 1,
+        conversationId: 'conversation-batch',
+        branchId: 'branch-batch',
+        sourceHostRevision: 7,
+        validatedHostRevision: 8,
+        sourceEventId: 'host-commit-7',
+        validatedCommitEventId: 'host-commit-8',
+      },
+      messageHashes: [
+        {
+          floor: 4,
+          messageHash: 'hash-floor-4',
+          hashVersion: 4,
+          messageUid: 'message-4',
+          swipeUid: 'swipe-4',
+        },
+      ],
+    });
+    const result = await (await getHandler(mod, 'extraction.commitBatch'))(ctx, input, {});
+    assert.strictEqual(result.result.host.conversationId, 'conversation-batch');
+    assert.strictEqual(result.result.host.branchId, 'branch-batch');
+    assert.strictEqual(result.result.host.hostRevision, 8);
+    assert.strictEqual(result.result.messageIdentityCount, 1);
+    const statements = calls.transaction[0].statements;
+    assert.ok(statements.some((item) => item.statement.includes('INSERT INTO st_bme_message_identity')));
+    assert.ok(statements.some((item) => item.statement.includes('DELETE FROM st_bme_message_identity')));
+    const identity = statements.find((item) => item.statement.includes('INSERT INTO st_bme_message_identity'));
+    assert.deepStrictEqual(identity.params.slice(0, 6), [
+      'chat-batch-1',
+      4,
+      'message-4',
+      'swipe-4',
+      'batch-1',
+      3,
+    ]);
+
+    const stale = createMockSqlTxCtx({ meta: { revision: 2 }, host });
+    stale.ctx.transactionName = 'extraction.commitBatch';
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(
+        stale.ctx,
+        buildCommitBatchInput({
+          hostTransaction: {
+            ...input.hostTransaction,
+            validatedHostRevision: 7,
+          },
+        }),
+        {},
+      ),
+      (error) => error?.status === 409 && error?.code === 'host_context_stale',
+    );
+    assert.strictEqual(stale.calls.transaction.length, 0);
+
+    const wrongOwner = createMockSqlTxCtx({
+      meta: {
+        revision: 2,
+        hostConversationId: 'conversation-other',
+        hostBranchId: 'branch-other',
+        hostRevision: 6,
+      },
+      host,
+    });
+    wrongOwner.ctx.transactionName = 'extraction.commitBatch';
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(
+        wrongOwner.ctx,
+        input,
+        {},
+      ),
+      (error) => error?.status === 409 && error?.code === 'host_lineage_conflict',
+    );
+    assert.strictEqual(wrongOwner.calls.transaction.length, 0);
+  }
+
   {
     const { calls, ctx } = createMockSqlTxCtx({ meta: { revision: 9 } });
     ctx.transactionName = 'extraction.commitBatch';

@@ -105,12 +105,25 @@ function clonePlain(value, fallback = null) {
 }
 
 function normalizeIdentity(identity = null) {
+  const hostLineage =
+    identity?.hostLineage && typeof identity.hostLineage === "object"
+      ? {
+          conversationId: String(identity.hostLineage.conversationId || "").trim(),
+          branchId: String(identity.hostLineage.branchId || "").trim(),
+          hostRevision: Number.isSafeInteger(Number(identity.hostLineage.hostRevision))
+            ? Math.max(0, Number(identity.hostLineage.hostRevision))
+            : 0,
+          commitEventId: String(identity.hostLineage.commitEventId || "").trim(),
+        }
+      : null;
   return {
     chatId: String(identity?.chatId || "").trim(),
     hostChatId: String(identity?.hostChatId || "").trim(),
     integrity: String(identity?.integrity || "").trim(),
     identitySource: String(identity?.identitySource || "").trim(),
     hasLikelySelectedChat: identity?.hasLikelySelectedChat === true,
+    hostLineage:
+      hostLineage?.conversationId && hostLineage?.branchId ? hostLineage : null,
   };
 }
 
@@ -156,9 +169,21 @@ export function createConversationSession(deps = {}) {
         normalized.hostChatId &&
         identity.hostChatId === normalized.hostChatId,
     );
+    const hostConversationChanged = Boolean(
+      identity.hostLineage?.conversationId &&
+        normalized.hostLineage?.conversationId &&
+        identity.hostLineage.conversationId !== normalized.hostLineage.conversationId,
+    );
+    const hostBranchChanged = Boolean(
+      identity.hostLineage?.branchId &&
+        normalized.hostLineage?.branchId &&
+        identity.hostLineage.branchId !== normalized.hostLineage.branchId,
+    );
     const changed =
       forceNewEpoch === true ||
       locatorChanged ||
+      hostConversationChanged ||
+      hostBranchChanged ||
       (canonicalChanged && !sameHostLocator);
     if (changed) {
       epoch += 1;
@@ -370,6 +395,10 @@ export function createConversationSession(deps = {}) {
       generationId: generation?.id || "",
       revision: Number(revision || 0),
       historyHash: String(historyHash || ""),
+      hostConversationId: identity.hostLineage?.conversationId || "",
+      hostBranchId: identity.hostLineage?.branchId || "",
+      hostRevision: Number(identity.hostLineage?.hostRevision || 0),
+      hostCommitEventId: identity.hostLineage?.commitEventId || "",
     });
   }
 
@@ -385,6 +414,20 @@ export function createConversationSession(deps = {}) {
         String(lease.hostChatId) === identity.hostChatId,
     );
     if (!sameChatId && !sameHostLocator) {
+      return false;
+    }
+    if (
+      lease.hostConversationId &&
+      identity.hostLineage?.conversationId &&
+      String(lease.hostConversationId) !== identity.hostLineage.conversationId
+    ) {
+      return false;
+    }
+    if (
+      lease.hostBranchId &&
+      identity.hostLineage?.branchId &&
+      String(lease.hostBranchId) !== identity.hostLineage.branchId
+    ) {
       return false;
     }
     if (requireGeneration) {

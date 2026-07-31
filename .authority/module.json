@@ -3,7 +3,7 @@
   "id": "third-party.st-bme",
   "displayName": "BME companion authority module",
   "ownerExtensionId": "third-party/st-bme",
-  "version": "7.8.4",
+  "version": "8.2.8",
   "protocolVersion": 1,
   "entry": "./server.cjs",
   "transactions": {
@@ -48,7 +48,7 @@
     },
     "graph.getHead": {
       "name": "graph.getHead",
-      "version": "1",
+      "version": "2",
       "title": "BME graph getHead",
       "description": "Returns BME graph head (revision + content hash + selected meta) for a chat. Read-only; detects same-revision divergence via a content hash over node/edge record_ids + revision.",
       "riskLevel": "low",
@@ -61,7 +61,7 @@
     },
     "graph.loadSnapshot": {
       "name": "graph.loadSnapshot",
-      "version": "1",
+      "version": "2",
       "title": "BME graph loadSnapshot",
       "description": "Returns the full BME graph snapshot (nodes, edges, tombstones, meta, state) for a chat. Read-only; supports minRevision short-circuit to skip payload when unchanged.",
       "riskLevel": "low",
@@ -74,7 +74,7 @@
     },
     "graph.commitDelta": {
       "name": "graph.commitDelta",
-      "version": "1",
+      "version": "2",
       "title": "BME graph commitDelta",
       "description": "Atomically commits a BME graph delta (upserts/deletes/tombstones + runtime meta patch) for a chat under per-chat lock + idempotency + CAS against baseRevision. Co-commits the runtime meta patch (lastProcessedFloor/extractionCount/processedMessageHashes) in the same atomic SQL transaction so extraction floor and graph contents cannot drift.",
       "riskLevel": "high",
@@ -87,7 +87,7 @@
     },
     "extraction.commitBatch": {
       "name": "extraction.commitBatch",
-      "version": "1",
+      "version": "2",
       "title": "BME extraction commitBatch",
       "description": "Atomically commits a BME extraction batch: graph delta, extraction cursor, message hashes, durable batch journal, vector dirty state, and compatibility graph meta under per-chat lock + idempotency + CAS.",
       "riskLevel": "high",

@@ -165,9 +165,19 @@ function buildMessageHashesForRange(graph = null, range = [null, null]) {
   if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
   const rows = [];
   for (let floor = Math.floor(start); floor <= Math.floor(end); floor += 1) {
-    const messageHash = hashes[String(floor)] ?? hashes[floor];
-    if (typeof messageHash !== "string" || !messageHash) continue;
-    rows.push({ floor, messageHash, hashVersion: 1 });
+    const record = hashes[String(floor)] ?? hashes[floor];
+    const messageHash =
+      typeof record === "string"
+        ? record
+        : String(record?.messageHash || record?.hash || "").trim();
+    if (!messageHash) continue;
+    rows.push({
+      floor,
+      messageHash,
+      hashVersion: 4,
+      messageUid: String(record?.messageUid || "").trim(),
+      swipeUid: String(record?.swipeUid || "").trim(),
+    });
   }
   return rows;
 }
@@ -1274,6 +1284,7 @@ export async function executeExtractionBatchController(
   const batchChat = runtime.cloneGraphSnapshot(Array.isArray(chat) ? chat : []);
   const batchHistoryFingerprint =
     runtime.buildChatHistoryFingerprint(batchChat);
+  const sourceHostContext = runtime.captureHostTransactionContext?.() || null;
   const conversationLease = runtime.captureConversationLease?.() || null;
   const batchChatId = String(
     runtime.getCurrentChatId?.() || currentGraph?.historyState?.chatId || "",
@@ -1290,9 +1301,15 @@ export async function executeExtractionBatchController(
         }) !== false
       : !batchChatId || !activeChatId || activeChatId === batchChatId;
     const activeChat = runtime.getContext?.()?.chat ?? chat;
+    const activeHostContext = runtime.captureHostTransactionContext?.() || null;
     return {
       graphCurrent: runtime.getCurrentGraph() === expectedRuntimeGraph,
       conversationCurrent,
+      hostBranchCurrent:
+        runtime.areHostContextsInSameBranch?.(
+          sourceHostContext,
+          activeHostContext,
+        ) !== false,
       historyCurrent:
         !checkHistory ||
         runtime.buildChatHistoryFingerprint(activeChat) ===
@@ -1419,6 +1436,16 @@ export async function executeExtractionBatchController(
   )
     ? Number(workingGraph.historyState.extractionCount)
     : extractionCountBefore;
+  const validatedHostContext = runtime.captureHostTransactionContext?.() || null;
+  if (
+    runtime.areHostContextsInSameBranch?.(
+      sourceHostContext,
+      validatedHostContext,
+    ) === false
+  ) {
+    throw runtime.createAbortError?.("extraction-host-branch-changed") ||
+      new Error("extraction-host-branch-changed");
+  }
   const persistResult = await runtime.persistExtractionBatchResult({
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
@@ -1438,6 +1465,11 @@ export async function executeExtractionBatchController(
     vectorDirty: workingGraph?.vectorIndexState?.dirty === true,
     dirtyFromFloor: startIdx,
     chatStateTarget: batchChatStateTarget,
+    hostContext: validatedHostContext,
+    hostTransaction: runtime.buildHostTransactionFence?.(
+      sourceHostContext,
+      validatedHostContext,
+    ) || null,
   });
   const postPersistContext = getBatchContextState();
   if (

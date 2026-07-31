@@ -64,8 +64,8 @@ const editedDetection = detectHistoryMutation(editedChat, {
   processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
-assert.equal(editedDetection.dirty, true);
-assert.equal(editedDetection.earliestAffectedFloor, 1);
+assert.equal(editedDetection.dirty, false);
+assert.deepEqual(editedDetection.integrityDriftFloors, [1]);
 
 const bmeHiddenChat = structuredClone(chat);
 bmeHiddenChat[1].is_system = true;
@@ -94,14 +94,14 @@ const renamedDetection = detectHistoryMutation(renamedChat, {
   processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
-assert.equal(renamedDetection.dirty, true);
-assert.equal(renamedDetection.earliestAffectedFloor, 1);
+assert.equal(renamedDetection.dirty, false);
+assert.deepEqual(renamedDetection.integrityDriftFloors, [1]);
 
 assert.equal(
   buildChatHistoryFingerprint(bmeHiddenChat),
   buildChatHistoryFingerprint(chat),
 );
-assert.notEqual(
+assert.equal(
   buildChatHistoryFingerprint(editedChat),
   buildChatHistoryFingerprint(chat),
 );
@@ -115,9 +115,13 @@ assert.equal(
   ),
   null,
 );
-assert.deepEqual(
+assert.equal(
   resolveDirtyFloorFromMutationMeta("message-edited", 1, null, chat),
-  { floor: 1, source: "message-edited-meta" },
+  null,
+);
+assert.deepEqual(
+  resolveDirtyFloorFromMutationMeta("message-swiped", 1, null, chat),
+  { floor: 1, source: "message-swiped-meta" },
 );
 
 const middleDeletedChat = chat.toSpliced(1, 1);

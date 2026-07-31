@@ -122,6 +122,7 @@ function readGraphIdentityAliasRegistryRaw() {
   if (!storage) {
     return {
       byIntegrity: {},
+      byHostLineage: {},
     };
   }
 
@@ -130,6 +131,7 @@ function readGraphIdentityAliasRegistryRaw() {
     if (!raw) {
       return {
         byIntegrity: {},
+        byHostLineage: {},
       };
     }
 
@@ -140,13 +142,21 @@ function readGraphIdentityAliasRegistryRaw() {
       !Array.isArray(parsed.byIntegrity)
         ? parsed.byIntegrity
         : {};
+    const byHostLineage =
+      parsed?.byHostLineage &&
+      typeof parsed.byHostLineage === "object" &&
+      !Array.isArray(parsed.byHostLineage)
+        ? parsed.byHostLineage
+        : {};
 
     return {
       byIntegrity,
+      byHostLineage,
     };
   } catch {
     return {
       byIntegrity: {},
+      byHostLineage: {},
     };
   }
 }
@@ -164,6 +174,12 @@ function writeGraphIdentityAliasRegistryRaw(registry = null) {
           typeof registry.byIntegrity === "object" &&
           !Array.isArray(registry.byIntegrity)
             ? registry.byIntegrity
+            : {},
+        byHostLineage:
+          registry?.byHostLineage &&
+          typeof registry.byHostLineage === "object" &&
+          !Array.isArray(registry.byHostLineage)
+            ? registry.byHostLineage
             : {},
       }),
     );
@@ -185,11 +201,48 @@ function normalizeGraphIdentityAliasEntry(entry = {}, integrity = "") {
         .filter(Boolean),
     ),
   ).slice(-16);
+  const hostLineages = Array.isArray(entry.hostLineages)
+    ? entry.hostLineages
+        .map((lineage) => ({
+          conversationId: normalizeIdentityValue(lineage?.conversationId),
+          branchId: normalizeIdentityValue(lineage?.branchId),
+        }))
+        .filter((lineage) => lineage.conversationId && lineage.branchId)
+        .filter(
+          (lineage, index, values) =>
+            values.findIndex(
+              (candidate) =>
+                candidate.conversationId === lineage.conversationId &&
+                candidate.branchId === lineage.branchId,
+            ) === index,
+        )
+        .slice(-16)
+    : [];
 
   return {
     integrity: normalizedIntegrity,
     persistenceChatId: normalizedPersistenceChatId || normalizedIntegrity,
     hostChatIds: normalizedHostChatIds,
+    hostLineages,
+    updatedAt: String(entry.updatedAt || ""),
+  };
+}
+
+function buildHostLineageAliasKey(conversationId = "", branchId = "") {
+  const normalizedConversationId = normalizeIdentityValue(conversationId);
+  const normalizedBranchId = normalizeIdentityValue(branchId);
+  return normalizedConversationId && normalizedBranchId
+    ? JSON.stringify([normalizedConversationId, normalizedBranchId])
+    : "";
+}
+
+function normalizeHostLineageAliasEntry(entry = {}) {
+  return {
+    conversationId: normalizeIdentityValue(entry.conversationId),
+    branchId: normalizeIdentityValue(entry.branchId),
+    integrity: normalizeIdentityValue(entry.integrity),
+    hostChatId: normalizeIdentityValue(entry.hostChatId),
+    persistenceChatId: normalizeIdentityValue(entry.persistenceChatId),
     updatedAt: String(entry.updatedAt || ""),
   };
 }
@@ -198,17 +251,44 @@ export function rememberGraphIdentityAlias({
   integrity = "",
   hostChatId = "",
   persistenceChatId = "",
+  hostConversationId = "",
+  hostBranchId = "",
 } = {}) {
   const normalizedIntegrity = normalizeIdentityValue(integrity);
-  if (!normalizedIntegrity) return null;
-
   const normalizedHostChatId = normalizeIdentityValue(hostChatId);
   const normalizedPersistenceChatId = normalizeIdentityValue(
     persistenceChatId || normalizedIntegrity,
   );
+  const normalizedHostConversationId = normalizeIdentityValue(hostConversationId);
+  const normalizedHostBranchId = normalizeIdentityValue(hostBranchId);
+  const lineageKey = buildHostLineageAliasKey(
+    normalizedHostConversationId,
+    normalizedHostBranchId,
+  );
+  if (!normalizedIntegrity) {
+    if (!lineageKey || !normalizedPersistenceChatId) return null;
+    const registry = readGraphIdentityAliasRegistryRaw();
+    registry.byIntegrity ||= {};
+    registry.byHostLineage ||= {};
+    const lineageEntry = {
+      conversationId: normalizedHostConversationId,
+      branchId: normalizedHostBranchId,
+      integrity: "",
+      hostChatId: normalizedHostChatId,
+      persistenceChatId: normalizedPersistenceChatId,
+      updatedAt: new Date().toISOString(),
+    };
+    registry.byHostLineage[lineageKey] = lineageEntry;
+    writeGraphIdentityAliasRegistryRaw(registry);
+    return lineageEntry;
+  }
+
   const registry = readGraphIdentityAliasRegistryRaw();
+  registry.byIntegrity ||= {};
+  registry.byHostLineage ||= {};
+  const rawExistingEntry = registry.byIntegrity[normalizedIntegrity] || null;
   const existingEntry = normalizeGraphIdentityAliasEntry(
-    registry.byIntegrity?.[normalizedIntegrity] || {},
+    rawExistingEntry || {},
     normalizedIntegrity,
   );
   const hostChatIds = Array.from(
@@ -216,16 +296,94 @@ export function rememberGraphIdentityAlias({
       [normalizedHostChatId, ...existingEntry.hostChatIds].filter(Boolean),
     ),
   ).slice(-16);
-  const nextEntry = {
-    integrity: normalizedIntegrity,
-    persistenceChatId: normalizedPersistenceChatId || normalizedIntegrity,
-    hostChatIds,
-    updatedAt: new Date().toISOString(),
-  };
+  const hostLineages = [
+    ...(normalizedHostConversationId && normalizedHostBranchId
+      ? [
+          {
+            conversationId: normalizedHostConversationId,
+            branchId: normalizedHostBranchId,
+          },
+        ]
+      : []),
+    ...existingEntry.hostLineages,
+  ].filter(
+    (lineage, index, values) =>
+      values.findIndex(
+        (candidate) =>
+          candidate.conversationId === lineage.conversationId &&
+          candidate.branchId === lineage.branchId,
+      ) === index,
+  ).slice(-16);
+  const canUpdateIntegrityEntry = Boolean(
+    (rawExistingEntry &&
+      existingEntry.persistenceChatId === normalizedPersistenceChatId) ||
+      (!rawExistingEntry && normalizedPersistenceChatId === normalizedIntegrity),
+  );
+  const nextEntry = canUpdateIntegrityEntry
+    ? {
+        integrity: normalizedIntegrity,
+        persistenceChatId: normalizedPersistenceChatId || normalizedIntegrity,
+        hostChatIds,
+        hostLineages,
+        updatedAt: new Date().toISOString(),
+      }
+    : existingEntry;
 
-  registry.byIntegrity[normalizedIntegrity] = nextEntry;
+  if (canUpdateIntegrityEntry) {
+    registry.byIntegrity[normalizedIntegrity] = nextEntry;
+  }
+  if (lineageKey) {
+    registry.byHostLineage[lineageKey] = {
+      conversationId: normalizedHostConversationId,
+      branchId: normalizedHostBranchId,
+      integrity: normalizedIntegrity,
+      hostChatId: normalizedHostChatId,
+      persistenceChatId: normalizedPersistenceChatId,
+      updatedAt: new Date().toISOString(),
+    };
+  }
   writeGraphIdentityAliasRegistryRaw(registry);
   return nextEntry;
+}
+
+export function resolveGraphIdentityAliasByHostLineage({
+  conversationId = "",
+  branchId = "",
+} = {}) {
+  const normalizedConversationId = normalizeIdentityValue(conversationId);
+  const normalizedBranchId = normalizeIdentityValue(branchId);
+  if (!normalizedConversationId || !normalizedBranchId) return "";
+
+  const registry = readGraphIdentityAliasRegistryRaw();
+  const directEntry = normalizeHostLineageAliasEntry(
+    registry.byHostLineage?.[
+      buildHostLineageAliasKey(normalizedConversationId, normalizedBranchId)
+    ] || {},
+  );
+  if (
+    directEntry.conversationId === normalizedConversationId &&
+    directEntry.branchId === normalizedBranchId &&
+    directEntry.persistenceChatId
+  ) {
+    return directEntry.persistenceChatId;
+  }
+  let bestEntry = null;
+  for (const [integrity, value] of Object.entries(registry.byIntegrity || {})) {
+    const entry = normalizeGraphIdentityAliasEntry(value, integrity);
+    if (
+      !entry.hostLineages.some(
+        (lineage) =>
+          lineage.conversationId === normalizedConversationId &&
+          lineage.branchId === normalizedBranchId,
+      )
+    ) {
+      continue;
+    }
+    if (!bestEntry || String(entry.updatedAt || "") > String(bestEntry.updatedAt || "")) {
+      bestEntry = entry;
+    }
+  }
+  return normalizeIdentityValue(bestEntry?.persistenceChatId || "");
 }
 
 export function resolveGraphIdentityAliasByHostChatId(hostChatId = "") {
@@ -258,10 +416,14 @@ export function getGraphIdentityAliasCandidates({
   integrity = "",
   hostChatId = "",
   persistenceChatId = "",
+  hostConversationId = "",
+  hostBranchId = "",
 } = {}) {
   const normalizedIntegrity = normalizeIdentityValue(integrity);
   const normalizedHostChatId = normalizeIdentityValue(hostChatId);
   const normalizedPersistenceChatId = normalizeIdentityValue(persistenceChatId);
+  const normalizedHostConversationId = normalizeIdentityValue(hostConversationId);
+  const normalizedHostBranchId = normalizeIdentityValue(hostBranchId);
   const registry = readGraphIdentityAliasRegistryRaw();
   const candidates = [];
   const seen = new Set();
@@ -271,8 +433,24 @@ export function getGraphIdentityAliasCandidates({
     seen.add(normalized);
     candidates.push(normalized);
   };
+  const lineageAlias =
+    normalizedHostConversationId && normalizedHostBranchId
+      ? resolveGraphIdentityAliasByHostLineage({
+          conversationId: normalizedHostConversationId,
+          branchId: normalizedHostBranchId,
+        })
+      : "";
+  const hasDistinctLineageOwner = Boolean(
+    normalizedHostConversationId &&
+      normalizedHostBranchId &&
+      normalizedPersistenceChatId &&
+      normalizedIntegrity &&
+      normalizedPersistenceChatId !== normalizedIntegrity,
+  );
 
-  if (normalizedIntegrity) {
+  if (lineageAlias) {
+    pushCandidate(lineageAlias);
+  } else if (normalizedIntegrity && !hasDistinctLineageOwner) {
     const entry = normalizeGraphIdentityAliasEntry(
       registry.byIntegrity?.[normalizedIntegrity] || {},
       normalizedIntegrity,

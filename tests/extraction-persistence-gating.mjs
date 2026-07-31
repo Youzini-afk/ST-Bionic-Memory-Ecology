@@ -582,14 +582,10 @@ function createRuntime(persistResult, { checkpointError = null } = {}) {
     processedRange: [0, 0],
   });
 
-  await assert.rejects(
-    pending,
-    (error) =>
-      error?.name === "AbortError" &&
-      error?.message === "extraction-context-changed",
-  );
-  assert.equal(handleSuccessCalls, 0);
-  assert.equal(persistCalls, 0);
+  const completed = await pending;
+  assert.equal(completed.success, true);
+  assert.equal(handleSuccessCalls, 1);
+  assert.equal(persistCalls, 1);
 }
 
 {
@@ -625,24 +621,55 @@ function createRuntime(persistResult, { checkpointError = null } = {}) {
     storageTier: "indexeddb",
   });
 
+  const completed = await pending;
+  assert.equal(completed.success, true);
+  assert.equal(runtime.staleCheckpointSaves, 0);
+  assert.equal(runtime.graph.historyState.historyDirtyFrom, undefined);
+  assert.equal(runtime.getCurrentGraph().nodes.length, 1);
+}
+
+{
+  let releaseExtraction;
+  let notifyStarted;
+  const started = new Promise((resolve) => {
+    notifyStarted = resolve;
+  });
+  const runtime = createRuntime({ accepted: true, saved: true });
+  runtime.extractMemories = async () => {
+    notifyStarted();
+    return await new Promise((resolve) => {
+      releaseExtraction = resolve;
+    });
+  };
+  const chat = [
+    {
+      is_user: false,
+      mes: "原回复",
+      authority: { messageUid: "message-a" },
+    },
+  ];
+  const pending = executeExtractionBatchController(runtime, {
+    chat,
+    startIdx: 0,
+    endIdx: 0,
+    settings: {},
+  });
+  await started;
+  chat[0].authority.messageUid = "message-b";
+  releaseExtraction({
+    success: true,
+    newNodes: 1,
+    updatedNodes: 0,
+    newEdges: 0,
+    newNodeIds: ["stale-node"],
+    processedRange: [0, 0],
+  });
   await assert.rejects(
     pending,
     (error) =>
       error?.name === "AbortError" &&
       error?.message === "extraction-context-changed",
   );
-  assert.equal(runtime.staleCheckpointSaves, 1);
-  assert.deepEqual(runtime.staleCheckpointSaveOptions, {
-    reason: "extraction-stale-history-checkpoint",
-    awaitDurable: true,
-    captureShadow: true,
-  });
-  assert.equal(runtime.graph.historyState.historyDirtyFrom, 0);
-  assert.equal(
-    runtime.graph.historyState.lastMutationSource,
-    "extraction-history-lease",
-  );
-  assert.equal(runtime.graph.nodes.length, 0);
 }
 
 {

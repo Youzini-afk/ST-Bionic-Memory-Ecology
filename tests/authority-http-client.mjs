@@ -126,6 +126,16 @@ function jsonResponse(status, payload) {
   const input = { database: "st_bme_vectors", items: [{ externalId: "a", vector: [1, 2, 3] }] };
   const response = await client.requestModuleTransaction("third-party.st-bme", "vector.apply", input, {
     idempotencyKey: "idem-xyz",
+    hostContext: {
+      schemaVersion: 1,
+      phase: "snapshot",
+      conversationId: "conversation-http",
+      branchId: "branch-http",
+      hostRevision: 5,
+      baseHostRevision: 4,
+      commitEventId: "commit-http",
+      capturedAt: "2026-08-01T00:00:00.000Z",
+    },
   });
 
   // Verify the URL is the module transaction route, NOT /bme/vector-apply.
@@ -138,6 +148,9 @@ function jsonResponse(status, payload) {
   const body = JSON.parse(modCall.options.body);
   assert.equal(body.input.items.length, 1);
   assert.equal(body.idempotencyKey, "idem-xyz");
+  assert.equal(body.host.conversationId, "conversation-http");
+  assert.equal(body.host.branchId, "branch-http");
+  assert.equal(body.host.hostRevision, 5);
   assert.ok(!body.input.idempotencyKey, "idempotencyKey should be on envelope, not input");
 
   // Verify session header is present.

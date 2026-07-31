@@ -29,6 +29,9 @@ function createTaskRecord(task = {}) {
   return {
     id,
     chatId: String(task.chatId || "").trim(),
+    hostConversationId: String(task.hostConversationId || "").trim(),
+    hostBranchId: String(task.hostBranchId || "").trim(),
+    historyFingerprint: String(task.historyFingerprint || "").trim(),
     modelScope: String(task.modelScope || "").trim(),
     range: normalizeVectorSyncRange(task.range),
     reason:
@@ -47,6 +50,9 @@ function canMergeTask(left = null, right = null) {
       right &&
       !left.stale &&
       left.chatId === right.chatId &&
+      left.hostConversationId === right.hostConversationId &&
+      left.hostBranchId === right.hostBranchId &&
+      left.historyFingerprint === right.historyFingerprint &&
       left.modelScope === right.modelScope,
   );
 }
@@ -124,10 +130,25 @@ export function createVectorSyncCoalescer() {
       if (active === task) active = null;
       return true;
     },
-    isStale(task = null, chatId = "") {
+    isStale(task = null, current = "") {
       if (!task || task.stale) return true;
-      const currentChatId = String(chatId || "").trim();
-      return Boolean(currentChatId && task.chatId && currentChatId !== task.chatId);
+      const state = current && typeof current === "object" ? current : { chatId: current };
+      const currentChatId = String(state.chatId || "").trim();
+      const currentHostConversationId = String(state.hostConversationId || "").trim();
+      const currentHostBranchId = String(state.hostBranchId || "").trim();
+      const currentHistoryFingerprint = String(state.historyFingerprint || "").trim();
+      return Boolean(
+        (currentChatId && task.chatId && currentChatId !== task.chatId) ||
+          (currentHostConversationId &&
+            task.hostConversationId &&
+            currentHostConversationId !== task.hostConversationId) ||
+          (currentHostBranchId &&
+            task.hostBranchId &&
+            currentHostBranchId !== task.hostBranchId) ||
+          (currentHistoryFingerprint &&
+            task.historyFingerprint &&
+            currentHistoryFingerprint !== task.historyFingerprint),
+      );
     },
   };
 }

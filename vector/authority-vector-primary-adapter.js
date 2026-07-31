@@ -818,6 +818,7 @@ export class AuthorityTriviumHttpClient {
           ...(options.idempotencyKey ? { idempotencyKey: String(options.idempotencyKey) } : {}),
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
           ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
         },
       );
       return response?.result ?? response ?? {};
@@ -836,6 +837,7 @@ export class AuthorityTriviumHttpClient {
         {
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
           ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
         },
       );
       return response?.result ?? response ?? {};
@@ -854,6 +856,7 @@ export class AuthorityTriviumHttpClient {
         {
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
           ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
         },
       );
       return response?.result ?? response ?? {};

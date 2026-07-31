@@ -9,6 +9,11 @@ import {
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
 import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
 import {
+  buildHostTransactionFence,
+  captureHostTransactionContext,
+  normalizeHostTransactionContext,
+} from "../runtime/host-transaction-context.js";
+import {
   GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
   GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
   GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
@@ -23,6 +28,7 @@ export const AUTHORITY_GRAPH_STORE_MODE = "authority-sql-primary";
 const BME_AUTHORITY_MODULE_ID = "third-party.st-bme";
 const BME_GRAPH_COMMIT_DELTA_TRANSACTION = "graph.commitDelta";
 const BME_GRAPH_GET_HEAD_TRANSACTION = "graph.getHead";
+const BME_GRAPH_LOAD_SNAPSHOT_TRANSACTION = "graph.loadSnapshot";
 const BME_EXTRACTION_COMMIT_BATCH_TRANSACTION = "extraction.commitBatch";
 
 const META_DEFAULT_LAST_PROCESSED_FLOOR = -1;
@@ -349,6 +355,47 @@ function normalizeStateSnapshot(snapshot = {}) {
       ? Number(state.extractionCount ?? meta.extractionCount)
       : META_DEFAULT_EXTRACTION_COUNT,
   };
+}
+
+function buildModuleGraphSnapshot(response = {}, chatId = "", options = {}) {
+  if (!response || typeof response !== "object" || Array.isArray(response) || response.ok === false) {
+    throw new Error("AuthorityGraphStore: graph.loadSnapshot returned an invalid response");
+  }
+  if (response.unchanged === true) {
+    throw new Error("AuthorityGraphStore: graph.loadSnapshot unexpectedly omitted the snapshot payload");
+  }
+
+  const includeTombstones = options.includeTombstones !== false;
+  const normalized = sanitizeSnapshot(response);
+  const state = normalizeStateSnapshot(normalized);
+  const meta = {
+    ...createDefaultMetaValues(chatId),
+    ...normalized.meta,
+    ...state,
+    schemaVersion: BME_DB_SCHEMA_VERSION,
+    authorityGraphSchemaVersion: normalizeNonNegativeInteger(response.schemaVersion, 0),
+    chatId: normalizeChatId(chatId),
+    revision: normalizeRevision(response.revision ?? normalized.meta?.revision),
+    headHash: String(response.headHash || normalized.meta?.headHash || ""),
+    nodeCount: normalized.nodes.length,
+    edgeCount: normalized.edges.length,
+    tombstoneCount: includeTombstones
+      ? normalized.tombstones.length
+      : normalizeNonNegativeInteger(normalized.meta?.tombstoneCount, normalized.tombstones.length),
+    storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
+    storageMode: AUTHORITY_GRAPH_STORE_MODE,
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  };
+  const snapshot = {
+    meta,
+    nodes: normalized.nodes,
+    edges: normalized.edges,
+    tombstones: includeTombstones ? normalized.tombstones : [],
+    state,
+  };
+  if (!includeTombstones) snapshot.__stBmeTombstonesOmitted = true;
+  return snapshot;
 }
 
 function applyListOptions(records, options = {}) {
@@ -986,6 +1033,15 @@ export class AuthorityGraphStore {
       },
     };
     const client = this._getBmeGraphModuleClient();
+    const hostContext =
+      normalizeHostTransactionContext(options.hostContext || source.hostContext) ||
+      captureHostTransactionContext({
+        context: globalThis.SillyTavern?.getContext?.() || null,
+      });
+    const hostTransaction =
+      source.hostTransaction && typeof source.hostTransaction === "object"
+        ? source.hostTransaction
+        : buildHostTransactionFence(hostContext, hostContext);
     try {
       let head = null;
       if (typeof client.bmeGraphGetHead === "function") {
@@ -998,6 +1054,7 @@ export class AuthorityGraphStore {
           {
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+            ...(hostContext ? { hostContext } : {}),
           },
         );
       }
@@ -1020,6 +1077,7 @@ export class AuthorityGraphStore {
         pruneMessageHashesFromFloor: source.pruneMessageHashesFromFloor ?? null,
         delta: buildStableExtractionDeltaFingerprintShape(normalizedDelta, delta),
         journal: stripVolatileJournalIdentity(journal),
+        hostTransaction,
         options: {
           reason: String(options.reason || source.reason || "extraction-batch-complete"),
           markSyncDirty: options.markSyncDirty !== false,
@@ -1048,6 +1106,7 @@ export class AuthorityGraphStore {
         pruneMessageHashesFromFloor: source.pruneMessageHashesFromFloor ?? null,
         delta,
         journal,
+        ...(hostTransaction ? { hostTransaction } : {}),
         options: {
           reason: String(options.reason || source.reason || "extraction-batch-complete"),
           markSyncDirty: options.markSyncDirty !== false,
@@ -1061,6 +1120,7 @@ export class AuthorityGraphStore {
         idempotencyKey,
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        ...(hostContext ? { hostContext } : {}),
       };
       let response = null;
       try {
@@ -1091,6 +1151,16 @@ export class AuthorityGraphStore {
           graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
           lastBatchId: batchId,
           lastModified,
+          ...(hostContext
+            ? {
+                hostConversationId: hostContext.conversationId,
+                hostBranchId: hostContext.branchId,
+                hostRevision: hostContext.hostRevision,
+                hostCommitEventId:
+                  hostContext.commitEventId || hostContext.sourceEventId || "",
+                hostCommitTransactionId: hostContext.commitTransactionId || "",
+              }
+            : {}),
         });
       } catch (metaPatchError) {
         console.warn(`[ST-BME] extraction.commitBatch local meta cache patch failed after server commit:`, metaPatchError?.message || metaPatchError);
@@ -1116,6 +1186,8 @@ export class AuthorityGraphStore {
           commitPath: BME_EXTRACTION_COMMIT_BATCH_TRANSACTION,
           idempotencyKey,
           baseRevision,
+          hostRevision: Number(hostContext?.hostRevision || 0),
+          hostBranchId: String(hostContext?.branchId || ""),
           commitMs: normalizePersistCommitMs(readPersistCommitNow() - commitRequestedAt),
           statementCount: Number(response?.statementCount || 0),
         },
@@ -1232,6 +1304,9 @@ export class AuthorityGraphStore {
       idempotencyKey,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.hostContext !== undefined
+        ? { hostContext: options.hostContext }
+        : {}),
     });
 
     const nextRevision = normalizeRevision(response?.revision);
@@ -1368,6 +1443,7 @@ export class AuthorityGraphStore {
             ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+            ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
           },
         );
         return response?.result ?? response ?? {};
@@ -1380,6 +1456,20 @@ export class AuthorityGraphStore {
           {
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+            ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
+          },
+        );
+        return response?.result ?? response ?? {};
+      },
+      async bmeGraphLoadSnapshot(input, options = {}) {
+        const response = await http.requestModuleTransaction(
+          BME_AUTHORITY_MODULE_ID,
+          BME_GRAPH_LOAD_SNAPSHOT_TRANSACTION,
+          input,
+          {
+            ...(options.signal !== undefined ? { signal: options.signal } : {}),
+            ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+            ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
           },
         );
         return response?.result ?? response ?? {};
@@ -1396,6 +1486,7 @@ export class AuthorityGraphStore {
             ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+            ...(options.hostContext !== undefined ? { hostContext: options.hostContext } : {}),
           },
         );
         return response?.result ?? response ?? {};
@@ -1667,6 +1758,80 @@ export class AuthorityGraphStore {
   async exportSnapshot(options = {}) {
     await this.open();
     const includeTombstones = options && typeof options === "object" ? options.includeTombstones !== false : options !== false;
+    const normalizedOptions = options && typeof options === "object" ? options : {};
+    const authorityMeta = await this._resolveAuthorityMeta(normalizedOptions);
+    if (this._shouldUseBmeGraphCommit()) {
+      try {
+        const client = this._getBmeGraphModuleClient();
+        if (typeof client.bmeGraphLoadSnapshot !== "function") {
+          throw new Error("AuthorityGraphStore: BME graph.loadSnapshot module client unavailable");
+        }
+        const allowCrossLineageRead = normalizedOptions.allowCrossLineageRead === true;
+        const hostContext = allowCrossLineageRead
+          ? null
+          : normalizeHostTransactionContext(normalizedOptions.hostContext) ||
+            captureHostTransactionContext({
+              context: globalThis.SillyTavern?.getContext?.() || null,
+            });
+        const response = await client.bmeGraphLoadSnapshot(
+          {
+            chatId: this.chatId,
+            collectionId: String(this.options.collectionId || this.options.namespace || ""),
+            ...(this.options.database ? { database: this.options.database } : {}),
+          },
+          {
+            ...(normalizedOptions.signal !== undefined ? { signal: normalizedOptions.signal } : {}),
+            ...(normalizedOptions.timeoutMs !== undefined ? { timeoutMs: normalizedOptions.timeoutMs } : {}),
+            // Parent snapshots are read only while creating a child branch.
+            // Requiring an explicit opt-in keeps ordinary loads host-scoped.
+            hostContext,
+          },
+        );
+        const snapshot = buildModuleGraphSnapshot(response, this.chatId, {
+          includeTombstones,
+        });
+        this._setInMemoryAuthorityMeta(snapshot.meta);
+        return snapshot;
+      } catch (error) {
+        const status = Number(error?.status || error?.payload?.status || 0);
+        if (status === 409) {
+          // A lineage/revision conflict is authoritative. Never bypass it by
+          // reading the same rows through the raw SQL compatibility path.
+          throw error;
+        }
+        if (this._isAuthorityPrimaryOrDegraded(authorityMeta)) {
+          this._setInMemoryAuthorityMeta({
+            authorityOwned: true,
+            graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+          });
+          throw new AuthorityGraphModuleUnavailableError(
+            error?.message || "BME graph.loadSnapshot module transaction unavailable",
+            {
+              cause: error,
+              payload: error?.payload,
+              authorityOwned: true,
+              graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+            },
+          );
+        }
+        console.warn(
+          `[ST-BME] graph.loadSnapshot module transaction failed, falling back to the legacy SQL snapshot read:`,
+          error?.message || error,
+        );
+      }
+    } else if (this._isAuthorityPrimaryOrDegraded(authorityMeta)) {
+      this._setInMemoryAuthorityMeta({
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+      });
+      throw new AuthorityGraphModuleUnavailableError(
+        "BME graph.loadSnapshot module is not ready for authority-owned graph",
+        {
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+        },
+      );
+    }
     const [metaRows, nodes, edges, tombstones] = await Promise.all([
       this._query(`SELECT meta_key AS key, value_json AS valueJson FROM ${AUTHORITY_TABLES.meta} WHERE chat_id = :chatId`, {
         chatId: this.chatId,

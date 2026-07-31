@@ -730,7 +730,13 @@ async function testGraphSnapshotConverters() {
   graph.historyState.lastProcessedAssistantFloor = 9;
   graph.historyState.extractionCount = 4;
   graph.historyState.processedMessageHashes = {
-    1: "hash-1",
+    1: {
+      messageHash: "hash-1",
+      messageUid: "message-1",
+      swipeUid: "",
+      swipeIndex: null,
+      role: "assistant",
+    },
   };
   graph.vectorIndexState.hashToNodeId = {
     "vec-hash": "node-converter",
@@ -991,7 +997,8 @@ async function testGraphSnapshotConverters() {
     "buildGraphFromSnapshot 不应复用 snapshot 节点的嵌套字段引用",
   );
   assert.equal(
-    snapshot.meta[BME_RUNTIME_HISTORY_META_KEY].processedMessageHashes[1],
+    snapshot.meta[BME_RUNTIME_HISTORY_META_KEY].processedMessageHashes[1]
+      .messageHash,
     "hash-1",
     "buildGraphFromSnapshot 不应复用 snapshot historyState 的嵌套对象引用",
   );

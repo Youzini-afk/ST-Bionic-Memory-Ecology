@@ -860,6 +860,8 @@ export async function persistExtractionBatchResultImpl(runtime, {
   vectorDirty = undefined,
   dirtyFromFloor = undefined,
   chatStateTarget = null,
+  hostContext = null,
+  hostTransaction = null,
 } = {}) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {
@@ -1042,7 +1044,14 @@ export async function persistExtractionBatchResultImpl(runtime, {
           vectorDirty,
           dirtyFromFloor,
           reason,
-        }, { reason, vectorDirty, dirtyFromFloor });
+          hostContext,
+          hostTransaction,
+        }, {
+          reason,
+          vectorDirty,
+          dirtyFromFloor,
+          ...(hostContext ? { hostContext } : {}),
+        });
         if (commitResult?.accepted === true) {
           updateGraphPersistenceState({
             pendingPersist: false,

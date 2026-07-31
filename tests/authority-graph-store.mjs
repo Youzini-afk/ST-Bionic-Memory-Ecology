@@ -29,6 +29,7 @@ class MockAuthoritySqlClient {
     this.edges = new Map();
     this.tombstones = new Map();
     this.statements = [];
+    this.queries = [];
   }
 
   async transaction(statements = []) {
@@ -112,6 +113,7 @@ class MockAuthoritySqlClient {
   }
 
   async query(sql, params = {}) {
+    this.queries.push({ sql, params });
     const normalizedSql = String(sql || "").toLowerCase();
     if (normalizedSql.includes("from st_bme_graph_meta")) {
       return this._readRows(this.meta, params).map((row) => ({
@@ -528,10 +530,13 @@ function createBmeGraphModuleClientMock({
   extractionError = null,
   headResult = null,
   headError = null,
+  snapshotResult = null,
+  snapshotError = null,
 } = {}) {
   const calls = {
     bmeGraphCommit: [],
     bmeGraphGetHead: [],
+    bmeGraphLoadSnapshot: [],
     bmeExtractionCommitBatch: [],
   };
   return {
@@ -565,6 +570,20 @@ function createBmeGraphModuleClientMock({
       if (headError) throw headError;
       return headResult || { ok: true, revision: 42, headHash: "sha256:head" };
     },
+    async bmeGraphLoadSnapshot(input, options = {}) {
+      calls.bmeGraphLoadSnapshot.push({ input, options });
+      if (snapshotError) throw snapshotError;
+      return snapshotResult || {
+        ok: true,
+        revision: 0,
+        schemaVersion: 2,
+        meta: {},
+        nodes: [],
+        edges: [],
+        tombstones: [],
+        state: { lastProcessedFloor: -1, extractionCount: 0 },
+      };
+    },
     async bmeExtractionCommitBatch(input, options = {}) {
       calls.bmeExtractionCommitBatch.push({ input, options });
       if (extractionError) throw extractionError;
@@ -595,6 +614,16 @@ async function testCommitExtractionBatchSuccess() {
     bmeGraphModuleClient,
   });
   await store.open();
+  const hostContext = {
+    schemaVersion: 1,
+    phase: "snapshot",
+    conversationId: "conversation-extraction",
+    branchId: "branch-extraction",
+    hostRevision: 12,
+    baseHostRevision: 11,
+    commitEventId: "commit-12",
+    capturedAt: "2026-08-01T00:00:00.000Z",
+  };
   const result = await store.commitExtractionBatch({
     persistDelta: { upsertNodes: [{ id: "node-batch", type: "event" }], runtimeMetaPatch: { custom: true } },
     committedBatchJournalEntry: { id: "batch-abc", processedRange: [4, 6], stateBefore: { lastProcessedAssistantFloor: 3 } },
@@ -603,9 +632,19 @@ async function testCommitExtractionBatchSuccess() {
     lastProcessedAssistantFloor: 6,
     extractionCountBefore: 10,
     extractionCountAfter: 11,
-    messageHashes: [{ floor: 6, messageHash: "hash-6", hashVersion: 1 }],
+    messageHashes: [{ floor: 6, messageHash: "hash-6", hashVersion: 4, messageUid: "message-6", swipeUid: "swipe-6" }],
     pruneMessageHashesFromFloor: 4,
-  }, { reason: "extraction-test" });
+    hostContext,
+    hostTransaction: {
+      schemaVersion: 1,
+      conversationId: "conversation-extraction",
+      branchId: "branch-extraction",
+      sourceHostRevision: 11,
+      validatedHostRevision: 12,
+      sourceEventId: "commit-11",
+      validatedCommitEventId: "commit-12",
+    },
+  }, { reason: "extraction-test", hostContext });
   assert.equal(result.accepted, true);
   assert.equal(result.storageTier, "authority-sql");
   assert.equal(result.acceptedBy, "extraction.commitBatch");
@@ -615,7 +654,9 @@ async function testCommitExtractionBatchSuccess() {
   assert.ok(call.input.batchId.startsWith("batch-"));
   assert.equal(call.options.idempotencyKey, `extraction:authority-chat-extraction:${call.input.batchId}`);
   assert.equal(call.input.delta.runtimeMetaPatch.authorityOwned, true);
-  assert.deepEqual(call.input.messageHashes, [{ floor: 6, messageHash: "hash-6", hashVersion: 1 }]);
+  assert.deepEqual(call.input.messageHashes, [{ floor: 6, messageHash: "hash-6", hashVersion: 4, messageUid: "message-6", swipeUid: "swipe-6" }]);
+  assert.equal(call.input.hostTransaction.branchId, "branch-extraction");
+  assert.deepEqual(call.options.hostContext, hostContext);
   assert.equal(await store.getMeta("revision"), 43);
   assert.equal(await store.getMeta("lastProcessedAssistantFloor"), 6);
   assert.equal(await store.getMeta("extractionCount"), 11);
@@ -988,6 +1029,154 @@ async function testGetHeadUsesModule() {
   assert.equal(bmeGraphModuleClient.calls.bmeGraphGetHead[0].options.timeoutMs, 1234);
 }
 
+async function testExportSnapshotUsesHostScopedModuleRead() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const hostContext = {
+    schemaVersion: 1,
+    phase: "snapshot",
+    conversationId: "conversation-load",
+    branchId: "branch-load",
+    hostRevision: 17,
+    baseHostRevision: 16,
+    commitEventId: "commit-load-17",
+    capturedAt: "2026-08-01T00:00:00.000Z",
+  };
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({
+    snapshotResult: {
+      ok: true,
+      chatId: "authority-chat-load",
+      revision: 7,
+      headHash: "sha256:load-head",
+      schemaVersion: 2,
+      meta: {
+        hostConversationId: "conversation-load",
+        hostBranchId: "branch-load",
+        lastProcessedFloor: 4,
+        extractionCount: 3,
+        tombstoneCount: 2,
+      },
+      nodes: [{ id: "node-load", type: "event" }],
+      edges: [{ id: "edge-load", fromId: "node-load", toId: "node-load" }],
+      tombstones: [{ id: "tomb-load", kind: "node", targetId: "old-node" }],
+      state: { lastProcessedFloor: 4, extractionCount: 3 },
+    },
+  });
+  const store = new AuthorityGraphStore("authority-chat-load", {
+    sqlClient,
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.open();
+
+  const snapshot = await store.exportSnapshot({
+    includeTombstones: false,
+    timeoutMs: 4321,
+    hostContext,
+  });
+
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphLoadSnapshot.length, 1);
+  const call = bmeGraphModuleClient.calls.bmeGraphLoadSnapshot[0];
+  assert.equal(call.input.chatId, "authority-chat-load");
+  assert.equal(call.options.timeoutMs, 4321);
+  assert.deepEqual(call.options.hostContext, hostContext);
+  assert.equal(snapshot.meta.revision, 7);
+  assert.equal(snapshot.meta.headHash, "sha256:load-head");
+  assert.equal(snapshot.meta.authorityOwned, true);
+  assert.equal(snapshot.meta.graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY);
+  assert.equal(snapshot.meta.authorityGraphSchemaVersion, 2);
+  assert.equal(snapshot.meta.tombstoneCount, 2);
+  assert.equal(snapshot.nodes.length, 1);
+  assert.equal(snapshot.edges.length, 1);
+  assert.deepEqual(snapshot.tombstones, []);
+  assert.equal(snapshot.__stBmeTombstonesOmitted, true);
+  assert.deepEqual(snapshot.state, { lastProcessedFloor: 4, extractionCount: 3 });
+}
+
+async function testExportSnapshotAllowsExplicitUnscopedParentRead() {
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock();
+  const store = new AuthorityGraphStore("authority-parent-owner", {
+    sqlClient: new MockAuthoritySqlClient(),
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.exportSnapshot({
+    includeTombstones: true,
+    allowCrossLineageRead: true,
+  });
+
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphLoadSnapshot.length, 1);
+  assert.equal(
+    bmeGraphModuleClient.calls.bmeGraphLoadSnapshot[0].options.hostContext,
+    null,
+    "branch inheritance must explicitly remove the child host envelope while reading its parent",
+  );
+}
+
+async function testExportSnapshotNeverBypassesHostLineageConflict() {
+  const conflict = new AuthorityHttpError("graph belongs to another branch", {
+    status: 409,
+    code: "host_lineage_conflict",
+    payload: { details: { code: "host_lineage_conflict" } },
+  });
+  const sqlClient = new MockAuthoritySqlClient();
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({
+    snapshotError: conflict,
+  });
+  const store = new AuthorityGraphStore("authority-chat-conflicting-load", {
+    sqlClient,
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.open();
+  const dataQueryCountBefore = sqlClient.queries.filter((entry) =>
+    /st_bme_graph_(nodes|edges|tombstones)/i.test(String(entry.sql || "")),
+  ).length;
+
+  await assert.rejects(
+    () => store.exportSnapshot(),
+    (error) => error === conflict,
+  );
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphLoadSnapshot.length, 1);
+  assert.equal(
+    sqlClient.queries.filter((entry) =>
+      /st_bme_graph_(nodes|edges|tombstones)/i.test(String(entry.sql || "")),
+    ).length,
+    dataQueryCountBefore,
+    "a host-lineage conflict must not trigger a raw SQL snapshot fallback",
+  );
+}
+
+async function testExportSnapshotFailsClosedForAuthorityOwnedGraph() {
+  const unavailable = new AuthorityHttpError("module temporarily unavailable", {
+    status: 503,
+    code: "module_not_loaded",
+  });
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({
+    snapshotError: unavailable,
+  });
+  const store = new AuthorityGraphStore("authority-chat-owned-load", {
+    sqlClient: new MockAuthoritySqlClient(),
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  });
+
+  await assert.rejects(
+    () => store.exportSnapshot(),
+    (error) => {
+      assert.ok(error instanceof AuthorityGraphModuleUnavailableError);
+      assert.equal(error.cause, unavailable);
+      return true;
+    },
+  );
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphLoadSnapshot.length, 1);
+}
+
 await testCommitDeltaViaModuleSuccess();
 await testCommitDeltaViaModuleTransactionConflictThrows();
 await testCommitDeltaViaModuleOtherModuleErrorFallsBackToLocal();
@@ -995,6 +1184,10 @@ await testCommitDeltaViaModuleOtherModuleErrorThrowsForAuthorityPrimary();
 await testCommitDeltaLocalPathWhenModuleNotReady();
 await testCommitDeltaModuleNotReadyThrowsForAuthorityOwned();
 await testGetHeadUsesModule();
+await testExportSnapshotUsesHostScopedModuleRead();
+await testExportSnapshotAllowsExplicitUnscopedParentRead();
+await testExportSnapshotNeverBypassesHostLineageConflict();
+await testExportSnapshotFailsClosedForAuthorityOwnedGraph();
 await testCommitExtractionBatchSuccess();
 await testCommitExtractionBatchStableBatchIdIgnoresRandomJournalId();
 await testCommitExtractionBatchRetriesSameIdempotentEnvelope();

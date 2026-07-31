@@ -168,6 +168,7 @@ export function registerCoreEventHooksController(runtime) {
   if (eventTypes.CHAT_LOADED) {
     bind(eventTypes.CHAT_LOADED, handlers.onChatLoaded);
   }
+  bind("authority_chat_committed", handlers.onAuthorityHostCommitted);
   if (eventTypes.MESSAGE_SENT) {
     bind(eventTypes.MESSAGE_SENT, handlers.onMessageSent);
   }

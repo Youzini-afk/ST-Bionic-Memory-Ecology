@@ -6,6 +6,8 @@
 // fallback identity, marker identity, and equivalence checks so later phases
 // can stop promoting recovery evidence into the active chat identity.
 
+import { buildHostLineage } from "./host-transaction-context.js";
+
 export function normalizeIdentityValue(value = "") {
   return String(value ?? "").trim();
 }
@@ -51,22 +53,82 @@ export function getContextIntegrityCore(context = null) {
   return normalizeIdentityValue(context?.chatMetadata?.integrity);
 }
 
+export function getContextHostLineageCore(context = null) {
+  const authority = context?.chatMetadata?.authority ?? context?.chat_metadata?.authority;
+  if (!authority || typeof authority !== "object" || Array.isArray(authority)) {
+    return null;
+  }
+  const hostRevision = Number(authority.revision);
+  return buildHostLineage({
+    schemaVersion: 1,
+    phase: "snapshot",
+    conversationId: authority.conversationId,
+    branchId: authority.branchId,
+    hostRevision:
+      Number.isSafeInteger(hostRevision) && hostRevision >= 0 ? hostRevision : 0,
+    baseHostRevision:
+      authority.lastEventId && hostRevision > 0 ? hostRevision - 1 : hostRevision,
+    commitEventId: authority.lastEventId,
+    commitTransactionId: authority.lastTransactionId,
+    commitCommittedAt: authority.committedAt,
+    parentConversationId: authority.parentConversationId,
+    parentBranchId: authority.parentBranchId,
+    parentRevision: authority.parentRevision,
+    capturedAt: new Date().toISOString(),
+  });
+}
+
 export function resolveActiveChatIdentityCore({
   context = null,
   hostChatId = "",
   integrity = "",
+  hostLineage = null,
+  inheritedPersistenceChatId = "",
   resolveAliasByHostChatId = null,
+  resolveAliasByHostLineage = null,
   hasLikelySelectedChat = null,
 } = {}) {
   const normalizedHostChatId = normalizeIdentityValue(hostChatId);
   const normalizedIntegrity = normalizeIdentityValue(integrity);
+  const normalizedInheritedPersistenceChatId = normalizeIdentityValue(
+    inheritedPersistenceChatId,
+  );
+  const hostLineageAliasedChatId =
+    hostLineage?.conversationId &&
+    hostLineage?.branchId &&
+    typeof resolveAliasByHostLineage === "function"
+      ? normalizeIdentityValue(resolveAliasByHostLineage(hostLineage))
+      : "";
+  const parentLineageAliasedChatId =
+    !hostLineageAliasedChatId &&
+    hostLineage?.parentConversationId &&
+    typeof resolveAliasByHostLineage === "function"
+      ? normalizeIdentityValue(
+          resolveAliasByHostLineage({
+            conversationId: hostLineage.parentConversationId,
+            branchId: hostLineage.parentBranchId,
+          }),
+        )
+      : "";
+  const derivedHostBranchChatId =
+    !hostLineageAliasedChatId &&
+    hostLineage?.parentConversationId &&
+    hostLineage?.conversationId &&
+    hostLineage?.branchId
+      ? `st-bme-host::${hostLineage.conversationId}::${hostLineage.branchId}`
+      : "";
   const aliasedChatId =
     !normalizedIntegrity &&
     normalizedHostChatId &&
     typeof resolveAliasByHostChatId === "function"
       ? normalizeIdentityValue(resolveAliasByHostChatId(normalizedHostChatId))
       : "";
-  const chatId = normalizedIntegrity || aliasedChatId || normalizedHostChatId;
+  const chatId =
+    hostLineageAliasedChatId ||
+    derivedHostBranchChatId ||
+    normalizedIntegrity ||
+    aliasedChatId ||
+    normalizedHostChatId;
   const hasLikely =
     typeof hasLikelySelectedChat === "function"
       ? hasLikelySelectedChat(context)
@@ -76,14 +138,28 @@ export function resolveActiveChatIdentityCore({
     chatId,
     hostChatId: normalizedHostChatId,
     integrity: normalizedIntegrity,
-    identitySource: normalizedIntegrity
-      ? "integrity"
-      : aliasedChatId
-        ? "alias"
-        : normalizedHostChatId
-          ? "host-chat-id"
-          : "",
+    hostLineage: hostLineage && typeof hostLineage === "object" ? { ...hostLineage } : null,
+    identitySource: hostLineageAliasedChatId
+      ? "host-lineage-alias"
+      : derivedHostBranchChatId
+        ? "host-lineage-branch"
+        : normalizedIntegrity
+          ? "integrity"
+          : aliasedChatId
+            ? "alias"
+            : normalizedHostChatId
+              ? "host-chat-id"
+              : "",
     hasLikelySelectedChat: hasLikely,
+    ...(derivedHostBranchChatId
+      ? {
+          parentPersistenceChatId:
+            parentLineageAliasedChatId ||
+            normalizedInheritedPersistenceChatId ||
+            normalizedIntegrity ||
+            normalizedHostChatId,
+        }
+      : {}),
   };
 }
 
@@ -91,7 +167,9 @@ export function resolveCurrentChatIdentityCore({
   context = null,
   readGlobalCurrentChatId = null,
   resolveAliasByHostChatId = null,
+  resolveAliasByHostLineage = null,
   resolveIntegrity = null,
+  resolveHostLineage = null,
   hasLikelySelectedChat = null,
 } = {}) {
   const hostChatId = resolveActiveHostChatIdCore({ context, readGlobalCurrentChatId });
@@ -102,11 +180,21 @@ export function resolveCurrentChatIdentityCore({
         normalizeIdentityValue(
           context?.chatMetadata?.chat_id || context?.chatMetadata?.chatId || "",
         );
+  const hostLineage =
+    typeof resolveHostLineage === "function"
+      ? resolveHostLineage(context)
+      : getContextHostLineageCore(context);
+  const inheritedPersistenceChatId = normalizeIdentityValue(
+    context?.chatMetadata?.st_bme_commit_marker?.chatId,
+  );
   return resolveActiveChatIdentityCore({
     context,
     hostChatId,
     integrity,
+    hostLineage,
+    inheritedPersistenceChatId,
     resolveAliasByHostChatId,
+    resolveAliasByHostLineage,
     hasLikelySelectedChat,
   });
 }

@@ -18,11 +18,19 @@ import {
   importLegacySynopsisToSummaryState,
   normalizeGraphSummaryState,
 } from "../graph/summary-state.js";
+import {
+  buildHostLineage,
+  buildProcessedMessageRecord,
+  buildStructuralMessageIdentity,
+  captureHostTransactionContext,
+  normalizeHostLineage,
+  normalizeProcessedMessageRecord,
+} from "./host-transaction-context.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
 export const BATCH_JOURNAL_VERSION = 2;
-export const PROCESSED_MESSAGE_HASH_VERSION = 3;
+export const PROCESSED_MESSAGE_HASH_VERSION = 4;
 const graphPersistDirtyStateByGraph = new WeakMap();
 export const MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY =
   "manualBackupBatchJournalCoverage";
@@ -38,6 +46,7 @@ export function createDefaultHistoryState(chatId = "") {
     processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
     processedMessageHashes: {},
     processedMessageHashesNeedRefresh: false,
+    hostLineage: null,
     historyDirtyFrom: null,
     lastMutationReason: "",
     lastMutationSource: "",
@@ -722,6 +731,15 @@ export function normalizeGraphRuntimeState(graph, chatId = "", options = {}) {
     historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
     historyState.processedMessageHashesNeedRefresh = true;
   }
+  if (!historyState.processedMessageHashesNeedRefresh) {
+    const normalizedProcessedMessages = {};
+    for (const [floor, value] of Object.entries(historyState.processedMessageHashes)) {
+      const normalized = normalizeProcessedMessageRecord(value);
+      if (normalized) normalizedProcessedMessages[String(floor)] = normalized;
+    }
+    historyState.processedMessageHashes = normalizedProcessedMessages;
+  }
+  historyState.hostLineage = normalizeHostLineage(historyState.hostLineage);
   const lastProcessedAssistantFloor = Number(
     historyState.lastProcessedAssistantFloor,
   );
@@ -919,14 +937,14 @@ export function buildMessageHash(message) {
 }
 
 export function buildChatHistoryFingerprint(chat = []) {
-  const messageHashes = Array.isArray(chat)
-    ? chat.map((message) => buildMessageHash(message))
+  const messageIdentities = Array.isArray(chat)
+    ? chat.map((message, index) => buildStructuralMessageIdentity(message, index))
     : [];
   return String(
     stableHashString(
       JSON.stringify({
-        version: PROCESSED_MESSAGE_HASH_VERSION,
-        messageHashes,
+        version: 1,
+        messageIdentities,
       }),
     ),
   );
@@ -943,7 +961,10 @@ export function snapshotProcessedMessageHashes(
 
   const upperBound = Math.min(lastProcessedAssistantFloor, chat.length - 1);
   for (let index = 0; index <= upperBound; index++) {
-    result[index] = buildMessageHash(chat[index]);
+    result[index] = buildProcessedMessageRecord(
+      chat[index],
+      buildMessageHash(chat[index]),
+    );
   }
   return result;
 }
@@ -976,6 +997,15 @@ export function applyProcessedHistorySnapshotToGraph(
       ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
       : {};
   historyState.processedMessageHashesNeedRefresh = false;
+  const capturedHostLineage = buildHostLineage(
+    captureHostTransactionContext({
+      context: {
+        chat,
+        chatMetadata: globalThis.SillyTavern?.getContext?.()?.chatMetadata,
+      },
+    }),
+  );
+  if (capturedHostLineage) historyState.hostLineage = capturedHostLineage;
   graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
   markGraphPersistRuntimeMetaDirty(
     graph,
@@ -1036,6 +1066,15 @@ export function rebindProcessedHistoryStateToChat(
       ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
       : {};
   historyState.processedMessageHashesNeedRefresh = false;
+  const capturedHostLineage = buildHostLineage(
+    captureHostTransactionContext({
+      context: {
+        chat,
+        chatMetadata: globalThis.SillyTavern?.getContext?.()?.chatMetadata,
+      },
+    }),
+  );
+  if (capturedHostLineage) historyState.hostLineage = capturedHostLineage;
   graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
   markGraphPersistRuntimeMetaDirty(
     graph,
@@ -1112,6 +1151,7 @@ export function detectHistoryMutation(chat, historyState) {
     }
   }
 
+  const integrityDriftFloors = [];
   for (const floor of trackedFloors) {
     if (floor >= chat.length) {
       return {
@@ -1121,17 +1161,81 @@ export function detectHistoryMutation(chat, historyState) {
       };
     }
 
-    const currentHash = buildMessageHash(chat[floor]);
-    if (currentHash !== processedMessageHashes[floor]) {
+    const previous = normalizeProcessedMessageRecord(processedMessageHashes[floor]);
+    const current = buildProcessedMessageRecord(
+      chat[floor],
+      buildMessageHash(chat[floor]),
+    );
+    if (!previous) {
       return {
         dirty: true,
         earliestAffectedFloor: floor,
-        reason: `楼层 ${floor} 内容或 swipe 已变化`,
+        reason: `楼层 ${floor} 缺少可用的处理记录，执行保守重放`,
       };
+    }
+    if (
+      previous.messageUid &&
+      current.messageUid &&
+      previous.messageUid !== current.messageUid
+    ) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 的稳定消息身份已变化`,
+      };
+    }
+    if (
+      (previous.swipeUid || current.swipeUid) &&
+      previous.swipeUid !== current.swipeUid
+    ) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 的稳定 swipe 身份已变化`,
+      };
+    }
+    if (
+      !previous.swipeUid &&
+      !current.swipeUid &&
+      previous.swipeIndex != null &&
+      current.swipeIndex != null &&
+      previous.swipeIndex !== current.swipeIndex
+    ) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 的 swipe 已变化`,
+      };
+    }
+    if (
+      previous.role &&
+      current.role &&
+      previous.role !== current.role
+    ) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 的消息角色结构已变化`,
+      };
+    }
+    if (
+      previous.messageHash &&
+      current.messageHash &&
+      previous.messageHash !== current.messageHash
+    ) {
+      // Content hashes are forensic integrity evidence only.  Other ST
+      // extensions may append text, images or hidden draft blocks after a
+      // floor was generated; BME must not silently choose to re-extract it.
+      integrityDriftFloors.push(floor);
     }
   }
 
-  return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  return {
+    dirty: false,
+    earliestAffectedFloor: null,
+    reason: "",
+    integrityDriftFloors,
+  };
 }
 
 export function markHistoryDirty(graph, floor, reason = "", source = "") {

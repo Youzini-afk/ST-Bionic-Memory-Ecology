@@ -4,6 +4,10 @@ import {
   PROCESSED_MESSAGE_HASH_VERSION,
 } from "../runtime/runtime-state.js";
 import { createAuthorityBlobAdapter } from "../maintenance/authority-blob-adapter.js";
+import {
+  normalizeHostLineage,
+  normalizeProcessedMessageRecord,
+} from "../runtime/host-transaction-context.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
@@ -2073,9 +2077,9 @@ function normalizeProcessedMessageHashes(record = {}) {
   const normalized = {};
   for (const [floorKey, hashValue] of Object.entries(record)) {
     const floor = Number.parseInt(floorKey, 10);
-    const normalizedHash = String(hashValue || "").trim();
-    if (!Number.isFinite(floor) || floor < 0 || !normalizedHash) continue;
-    normalized[String(floor)] = normalizedHash;
+    const normalizedRecord = normalizeProcessedMessageRecord(hashValue);
+    if (!Number.isFinite(floor) || floor < 0 || !normalizedRecord) continue;
+    normalized[String(floor)] = normalizedRecord;
   }
   return normalized;
 }
@@ -2189,6 +2193,7 @@ function normalizeRuntimeHistoryMeta(value = {}, fallbackChatId = "") {
       ? {}
       : normalizeProcessedMessageHashes(input.processedMessageHashes),
     processedMessageHashesNeedRefresh,
+    hostLineage: normalizeHostLineage(input.hostLineage),
     historyDirtyFrom: normalizeOptionalFloor(input.historyDirtyFrom),
     lastMutationReason:
       typeof input.lastMutationReason === "string" ? input.lastMutationReason : "",
@@ -2302,6 +2307,15 @@ function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) 
 
   const mergedHashes = {};
   const conflictFloors = [];
+  const localLineage = normalizeHostLineage(localHistory.hostLineage);
+  const remoteLineage = normalizeHostLineage(remoteHistory.hostLineage);
+  const hasLineageConflict = Boolean(
+    localLineage &&
+      remoteLineage &&
+      (localLineage.conversationId !== remoteLineage.conversationId ||
+        localLineage.branchId !== remoteLineage.branchId),
+  );
+  if (hasLineageConflict) conflictFloors.push(0);
   const floorSet = new Set([
     ...Object.keys(localHistory.processedMessageHashes),
     ...Object.keys(remoteHistory.processedMessageHashes),
@@ -2313,14 +2327,36 @@ function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) 
 
   for (const floor of sortedFloors) {
     const floorKey = String(floor);
-    const localHash = localHistory.processedMessageHashes[floorKey];
-    const remoteHash = remoteHistory.processedMessageHashes[floorKey];
-    if (localHash && remoteHash && localHash !== remoteHash) {
+    const localHash = normalizeProcessedMessageRecord(
+      localHistory.processedMessageHashes[floorKey],
+    );
+    const remoteHash = normalizeProcessedMessageRecord(
+      remoteHistory.processedMessageHashes[floorKey],
+    );
+    const stableMessageConflict = Boolean(
+      localHash?.messageUid &&
+        remoteHash?.messageUid &&
+        localHash.messageUid !== remoteHash.messageUid,
+    );
+    const stableSwipeConflict = Boolean(
+      localHash?.swipeUid &&
+        remoteHash?.swipeUid &&
+        localHash.swipeUid !== remoteHash.swipeUid,
+    );
+    if (localHash && remoteHash && (stableMessageConflict || stableSwipeConflict)) {
       conflictFloors.push(floor);
       continue;
     }
     if (localHash || remoteHash) {
-      mergedHashes[floorKey] = localHash || remoteHash;
+      const preferred = remoteHash || localHash;
+      const fallback = localHash || remoteHash;
+      mergedHashes[floorKey] = {
+        messageHash: preferred.messageHash || fallback.messageHash || "",
+        messageUid: preferred.messageUid || fallback.messageUid || "",
+        swipeUid: preferred.swipeUid || fallback.swipeUid || "",
+        swipeIndex: preferred.swipeIndex ?? fallback.swipeIndex ?? null,
+        role: preferred.role || fallback.role || "",
+      };
     }
   }
 
@@ -2364,9 +2400,18 @@ function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) 
     processedMessageHashesNeedRefresh:
       localHistory.processedMessageHashesNeedRefresh === true ||
       remoteHistory.processedMessageHashesNeedRefresh === true,
+    hostLineage: hasLineageConflict
+      ? (Number(remoteLineage?.hostRevision || 0) >= Number(localLineage?.hostRevision || 0)
+          ? remoteLineage
+          : localLineage)
+      : (Number(remoteLineage?.hostRevision || 0) >= Number(localLineage?.hostRevision || 0)
+          ? remoteLineage || localLineage
+          : localLineage || remoteLineage),
     historyDirtyFrom,
     lastMutationReason: hasIntegrityConflict
-      ? `sync-merge:processed-hash-conflict@${firstConflictFloor}`
+      ? hasLineageConflict
+        ? "sync-merge:host-lineage-conflict"
+        : `sync-merge:processed-identity-conflict@${firstConflictFloor}`
       : String(remoteHistory.lastMutationReason || localHistory.lastMutationReason || ""),
     lastMutationSource: hasIntegrityConflict
       ? "sync-merge"
@@ -2386,6 +2431,7 @@ function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) 
     hasIntegrityConflict,
     safeLastProcessedFloor,
     conflictFloors,
+    hasLineageConflict,
   };
 }
 

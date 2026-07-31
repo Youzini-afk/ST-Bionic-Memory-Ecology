@@ -443,6 +443,7 @@ var GRAPH_TABLES = {
   tombstones: 'st_bme_graph_tombstones',
   extractionState: 'st_bme_extraction_state',
   messageHashes: 'st_bme_message_hashes',
+  messageIdentity: 'st_bme_message_identity',
   batchJournal: 'st_bme_batch_journal',
   vectorDirtyState: 'st_bme_vector_dirty_state',
 };
@@ -454,6 +455,7 @@ var GRAPH_SCHEMA_STATEMENTS = [
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.tombstones + ' (chat_id TEXT NOT NULL, record_id TEXT NOT NULL, payload_json TEXT NOT NULL, tombstone_kind TEXT, target_id TEXT, deleted_at INTEGER, source_device_id TEXT, PRIMARY KEY(chat_id, record_id))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.extractionState + ' (chat_id TEXT NOT NULL, last_processed_assistant_floor INTEGER NOT NULL DEFAULT -1, extraction_count INTEGER NOT NULL DEFAULT 0, last_batch_id TEXT, last_graph_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.messageHashes + ' (chat_id TEXT NOT NULL, floor INTEGER NOT NULL, message_hash TEXT NOT NULL, hash_version INTEGER NOT NULL DEFAULT 1, batch_id TEXT, graph_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id, floor))',
+  'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.messageIdentity + ' (chat_id TEXT NOT NULL, floor INTEGER NOT NULL, message_uid TEXT, swipe_uid TEXT, batch_id TEXT, graph_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id, floor))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.batchJournal + ' (chat_id TEXT NOT NULL, batch_id TEXT NOT NULL, idempotency_key TEXT, request_fingerprint TEXT NOT NULL, base_revision INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, head_hash TEXT, source_floor_start INTEGER, source_floor_end INTEGER, last_processed_floor_before INTEGER, last_processed_floor_after INTEGER NOT NULL, extraction_count_before INTEGER, extraction_count_after INTEGER NOT NULL, journal_json TEXT NOT NULL, vector_dirty_generation INTEGER NOT NULL DEFAULT 0, committed_at INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, batch_id))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.vectorDirtyState + ' (chat_id TEXT NOT NULL, dirty_generation INTEGER NOT NULL DEFAULT 0, clean_generation INTEGER NOT NULL DEFAULT 0, dirty_from_floor INTEGER, dirty_reason TEXT, graph_revision INTEGER NOT NULL DEFAULT 0, collection_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id))',
   'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_nodes_chat_deleted_at ON ' + GRAPH_TABLES.nodes + ' (chat_id, deleted_at)',
@@ -466,6 +468,8 @@ var GRAPH_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_tombstones_chat_target_id ON ' + GRAPH_TABLES.tombstones + ' (chat_id, target_id)',
   'CREATE INDEX IF NOT EXISTS ix_st_bme_message_hashes_chat_hash ON ' + GRAPH_TABLES.messageHashes + ' (chat_id, message_hash)',
   'CREATE INDEX IF NOT EXISTS ix_st_bme_message_hashes_chat_batch ON ' + GRAPH_TABLES.messageHashes + ' (chat_id, batch_id)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_message_identity_message_uid ON ' + GRAPH_TABLES.messageIdentity + ' (chat_id, message_uid)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_message_identity_swipe_uid ON ' + GRAPH_TABLES.messageIdentity + ' (chat_id, swipe_uid)',
   'CREATE UNIQUE INDEX IF NOT EXISTS ux_st_bme_batch_journal_chat_idempotency ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, idempotency_key)',
   'CREATE INDEX IF NOT EXISTS ix_st_bme_batch_journal_chat_revision ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, revision)',
   'CREATE INDEX IF NOT EXISTS ix_st_bme_batch_journal_chat_source_floor_end ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, source_floor_end)',
@@ -508,6 +512,11 @@ var GRAPH_META_REPORT_KEYS = [
   'nodeCount',
   'edgeCount',
   'tombstoneCount',
+  'hostConversationId',
+  'hostBranchId',
+  'hostRevision',
+  'hostCommitEventId',
+  'hostCommitTransactionId',
 ];
 
 function buildGraphMetaReport(meta) {
@@ -903,8 +912,122 @@ function normalizeMessageHashRecords(records) {
     if (!Number.isFinite(floor) || floor < 0 || !messageHash) return null;
     var hashVersion = readInteger(record.hashVersion, 1);
     if (!Number.isFinite(hashVersion) || hashVersion <= 0) hashVersion = 1;
-    return { floor: floor, messageHash: messageHash, hashVersion: hashVersion };
+    return {
+      floor: floor,
+      messageHash: messageHash,
+      hashVersion: hashVersion,
+      messageUid: normalizeString(record.messageUid, ''),
+      swipeUid: normalizeString(record.swipeUid, ''),
+    };
   }).filter(Boolean);
+}
+
+function buildMessageIdentityUpsertStatements(chatId, batchId, nextRevision, messageHashes, nowMs) {
+  var identities = toArray(messageHashes).filter(function (item) {
+    return normalizeString(item && item.messageUid, '') || normalizeString(item && item.swipeUid, '');
+  });
+  var statements = [];
+  var chunks = chunkArray(identities, CHUNK_ROWS_INSERT);
+  for (var c = 0; c < chunks.length; c++) {
+    var rows = [];
+    var params = [];
+    for (var i = 0; i < chunks[c].length; i++) {
+      var item = chunks[c][i];
+      rows.push('(?, ?, ?, ?, ?, ?, ?)');
+      params.push(chatId, item.floor, item.messageUid || null, item.swipeUid || null, batchId, nextRevision, nowMs);
+    }
+    if (!rows.length) continue;
+    statements.push({
+      statement:
+        'INSERT INTO ' + GRAPH_TABLES.messageIdentity +
+        ' (chat_id, floor, message_uid, swipe_uid, batch_id, graph_revision, updated_at) VALUES ' +
+        rows.join(', ') +
+        ' ON CONFLICT(chat_id, floor) DO UPDATE SET message_uid = excluded.message_uid, swipe_uid = excluded.swipe_uid, batch_id = excluded.batch_id, graph_revision = excluded.graph_revision, updated_at = excluded.updated_at',
+      params: params,
+    });
+  }
+  return statements;
+}
+
+function normalizeHostTransactionFence(value) {
+  if (value == null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.schemaVersion) !== 1) {
+    throw createValidationError('BME hostTransaction must use schemaVersion 1');
+  }
+  var conversationId = normalizeString(value.conversationId, '');
+  var branchId = normalizeString(value.branchId, '');
+  var sourceHostRevision = readInteger(value.sourceHostRevision, NaN);
+  var validatedHostRevision = readInteger(value.validatedHostRevision, NaN);
+  if (!conversationId || !branchId || !Number.isFinite(sourceHostRevision) || !Number.isFinite(validatedHostRevision) || sourceHostRevision < 0 || validatedHostRevision < sourceHostRevision) {
+    throw createValidationError('BME hostTransaction contains invalid lineage or revisions');
+  }
+  return {
+    schemaVersion: 1,
+    conversationId: conversationId,
+    branchId: branchId,
+    sourceHostRevision: sourceHostRevision,
+    validatedHostRevision: validatedHostRevision,
+    sourceEventId: normalizeString(value.sourceEventId, ''),
+    validatedCommitEventId: normalizeString(value.validatedCommitEventId, ''),
+  };
+}
+
+function validateHostLineage(txCtx, hostTransaction, existingMeta) {
+  var host = txCtx && txCtx.host && typeof txCtx.host === 'object' ? txCtx.host : null;
+  if (hostTransaction && !host) {
+    throw createConflictError('host_context_unavailable', 'BME transaction supplied a host fence but Authority did not bind a host context');
+  }
+  if (!host) return null;
+  var hostConversationId = normalizeString(host.conversationId, '');
+  var hostBranchId = normalizeString(host.branchId, '');
+  var hostRevision = readInteger(host.hostRevision, NaN);
+  if (!hostConversationId || !hostBranchId || !Number.isFinite(hostRevision)) {
+    throw createConflictError('host_context_invalid', 'BME transaction received an invalid Authority host context');
+  }
+  if (hostTransaction && (
+    hostTransaction.conversationId !== hostConversationId ||
+    hostTransaction.branchId !== hostBranchId ||
+    hostTransaction.validatedHostRevision !== hostRevision
+  )) {
+    throw createConflictError('host_context_stale', 'BME extraction host fence no longer matches the current SillyTavern transaction', {
+      expectedConversationId: hostTransaction.conversationId,
+      expectedBranchId: hostTransaction.branchId,
+      expectedHostRevision: hostTransaction.validatedHostRevision,
+      conversationId: hostConversationId,
+      branchId: hostBranchId,
+      hostRevision: hostRevision,
+    });
+  }
+  var storedConversationId = normalizeString(existingMeta && existingMeta.hostConversationId, '');
+  var storedBranchId = normalizeString(existingMeta && existingMeta.hostBranchId, '');
+  var storedHostRevision = readInteger(existingMeta && existingMeta.hostRevision, 0);
+  if ((storedConversationId && storedConversationId !== hostConversationId) || (storedBranchId && storedBranchId !== hostBranchId)) {
+    throw createConflictError('host_lineage_conflict', 'BME graph belongs to a different SillyTavern conversation branch', {
+      storedConversationId: storedConversationId,
+      storedBranchId: storedBranchId,
+      conversationId: hostConversationId,
+      branchId: hostBranchId,
+    });
+  }
+  if (storedHostRevision > hostRevision) {
+    throw createConflictError('host_context_stale', 'BME graph has already observed a newer SillyTavern host revision', {
+      storedHostRevision: storedHostRevision,
+      hostRevision: hostRevision,
+    });
+  }
+  return host;
+}
+
+function attachHostRuntimeMeta(delta, host) {
+  if (!host) return delta;
+  var runtimeMetaPatch = Object.assign({}, delta && delta.runtimeMetaPatch && typeof delta.runtimeMetaPatch === 'object' && !Array.isArray(delta.runtimeMetaPatch) ? delta.runtimeMetaPatch : {}, {
+    hostConversationId: normalizeString(host.conversationId, ''),
+    hostBranchId: normalizeString(host.branchId, ''),
+    hostRevision: readInteger(host.hostRevision, 0),
+    hostCommitEventId: normalizeString(host.commitEventId || host.sourceEventId, ''),
+    hostCommitTransactionId: normalizeString(host.commitTransactionId, ''),
+  });
+  return Object.assign({}, delta || {}, { runtimeMetaPatch: runtimeMetaPatch });
 }
 
 function buildMessageHashesUpsertStatements(chatId, batchId, nextRevision, messageHashes, nowMs) {
@@ -1013,6 +1136,7 @@ function validateExtractionCommitBatchInput(input) {
       nextExtractionCount: nextExtractionCount,
     },
     messageHashes: normalizeMessageHashRecords(input.messageHashes),
+    hostTransaction: normalizeHostTransactionFence(input.hostTransaction),
     pruneMessageHashesFromFloor: input.pruneMessageHashesFromFloor === null || input.pruneMessageHashesFromFloor === undefined ? null : readInteger(input.pruneMessageHashesFromFloor, NaN),
     delta: delta,
     journal: journal,
@@ -1031,6 +1155,7 @@ function buildExtractionCommitBatchFingerprint(database, normalized) {
     extraction: normalized.extraction,
     delta: normalized.delta,
     messageHashes: normalized.messageHashes,
+    hostTransaction: normalized.hostTransaction,
     pruneMessageHashesFromFloor: normalized.pruneMessageHashesFromFloor,
     journal: normalized.journal,
     options: normalized.options,
@@ -1084,6 +1209,7 @@ function buildExtractionCommitBatchStatements(chatId, baseRevision, normalized, 
     lastBatchId: normalized.batchId,
   });
   var delta = Object.assign({}, normalized.delta, { runtimeMetaPatch: runtimeMetaPatch });
+  delta = attachHostRuntimeMeta(delta, normalized.boundHostContext);
   var graphBuilt = buildCommitDeltaStatements(chatId, baseRevision, delta, Object.assign({}, normalized.options, { reason: reason }), existingMeta);
   var nextRevision = graphBuilt.nextRevision;
   var shouldMarkVectorDirty = normalized.options.vectorDirty !== false || normalized.messageHashes.length > 0 || normalized.options.vectorDirtyHint === true;
@@ -1095,8 +1221,10 @@ function buildExtractionCommitBatchStatements(chatId, baseRevision, normalized, 
   var statements = graphBuilt.statements.slice();
   if (Number.isFinite(normalized.pruneMessageHashesFromFloor)) {
     statements.push({ statement: 'DELETE FROM ' + GRAPH_TABLES.messageHashes + ' WHERE chat_id = ? AND floor >= ?', params: [chatId, normalized.pruneMessageHashesFromFloor] });
+    statements.push({ statement: 'DELETE FROM ' + GRAPH_TABLES.messageIdentity + ' WHERE chat_id = ? AND floor >= ?', params: [chatId, normalized.pruneMessageHashesFromFloor] });
   }
   statements = statements.concat(buildMessageHashesUpsertStatements(chatId, normalized.batchId, nextRevision, normalized.messageHashes, nowMs));
+  statements = statements.concat(buildMessageIdentityUpsertStatements(chatId, normalized.batchId, nextRevision, normalized.messageHashes, nowMs));
   statements.push(buildExtractionStateUpsertStatement(chatId, normalized.batchId, nextRevision, normalized.extraction, nowMs));
   statements.push(buildBatchJournalInsertStatement(chatId, normalized.batchId, normalized.idempotencyKey, fingerprint, baseRevision, nextRevision, headHash, normalized.processedRange, normalized.extraction, normalized.journal, nextDirtyGeneration, nowMs));
   if (shouldMarkVectorDirty) {
@@ -1374,6 +1502,7 @@ module.exports.activate = async function activate(ctx) {
       await ensureGraphSchema(txCtx, database);
 
       var head = await readGraphHead(txCtx, database, chatId);
+      validateHostLineage(txCtx, null, head.meta);
       if (!head.exists) {
         return {
           result: {
@@ -1413,6 +1542,7 @@ module.exports.activate = async function activate(ctx) {
       await ensureGraphSchema(txCtx, database);
 
       var head = await readGraphHead(txCtx, database, chatId);
+      validateHostLineage(txCtx, null, head.meta);
 
       // minRevision short-circuit: if the caller already has this revision,
       // skip the payload and tell them nothing changed.
@@ -1446,7 +1576,7 @@ module.exports.activate = async function activate(ctx) {
             edges: [],
             tombstones: [],
             state: {
-              lastProcessedFloor: 0,
+              lastProcessedFloor: -1,
               extractionCount: 0,
             },
           },
@@ -1486,7 +1616,7 @@ module.exports.activate = async function activate(ctx) {
 
       var meta = head.meta;
       var lastProcessedFloor = Number(meta.lastProcessedFloor);
-      if (!Number.isFinite(lastProcessedFloor)) lastProcessedFloor = 0;
+      if (!Number.isFinite(lastProcessedFloor)) lastProcessedFloor = -1;
       var extractionCount = Number(meta.extractionCount);
       if (!Number.isFinite(extractionCount)) extractionCount = 0;
 
@@ -1516,6 +1646,11 @@ module.exports.activate = async function activate(ctx) {
       var database = resolveGraphDatabase(input);
       var normalized = validateExtractionCommitBatchInput(input);
       var chatId = normalized.chatId;
+      normalized.boundHostContext = validateHostLineage(
+        txCtx,
+        normalized.hostTransaction,
+        null
+      );
 
       if (!txCtx || typeof txCtx.locks !== 'object' || typeof txCtx.locks.withLock !== 'function') {
         var lockErr = new Error('BME extraction.commitBatch requires ctx.locks.withLock');
@@ -1584,6 +1719,11 @@ module.exports.activate = async function activate(ctx) {
               )
             );
             var existingMeta = metaRows.length > 0 ? toMetaMap(metaRows) : {};
+            normalized.boundHostContext = validateHostLineage(
+              txCtx,
+              normalized.hostTransaction,
+              existingMeta
+            );
             var currentRevision = Number(existingMeta.revision);
             if (!Number.isFinite(currentRevision)) currentRevision = 0;
             if (currentRevision !== normalized.baseRevision) {
@@ -1642,6 +1782,12 @@ module.exports.activate = async function activate(ctx) {
                 extractionCount: normalized.extraction.nextExtractionCount,
               },
               messageHashCount: normalized.messageHashes.length,
+              messageIdentityCount: normalized.messageHashes.filter(function (record) { return record.messageUid || record.swipeUid; }).length,
+              host: normalized.boundHostContext ? {
+                conversationId: normalized.boundHostContext.conversationId,
+                branchId: normalized.boundHostContext.branchId,
+                hostRevision: normalized.boundHostContext.hostRevision,
+              } : null,
               applied: {
                 upsertedNodes: built.upsertedNodes,
                 upsertedEdges: built.upsertedEdges,
@@ -1740,6 +1886,7 @@ module.exports.activate = async function activate(ctx) {
               )
             );
             var existingMeta = metaRows.length > 0 ? toMetaMap(metaRows) : {};
+            var boundHostContext = validateHostLineage(txCtx, null, existingMeta);
             var currentRevision = Number(existingMeta.revision);
             if (!Number.isFinite(currentRevision)) currentRevision = 0;
 
@@ -1762,6 +1909,7 @@ module.exports.activate = async function activate(ctx) {
             }
 
             // Build statements (throws validation_error if budget exceeded).
+            delta = attachHostRuntimeMeta(delta, boundHostContext);
             var built = buildCommitDeltaStatements(chatId, baseRevision, delta, options, existingMeta);
 
             // Execute as ONE atomic transaction.
