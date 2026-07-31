@@ -18,6 +18,8 @@ const PRODUCT_CONTRACT_TESTS = [
   "recall-authoritative-generation-input.mjs",
   "recall-reapply-block.mjs",
   "recall-reroll-reuse.mjs",
+  "vnext-architecture-contract.mjs",
+  "vnext-product-invariants.mjs",
 ];
 
 function toPosixPath(filePath) {
