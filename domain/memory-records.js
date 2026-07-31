@@ -482,6 +482,47 @@ export function createTurnArtifact(input = {}) {
   };
 }
 
+export function createMigrationRecord(input = {}) {
+  const chatId = requireDomainId(input.chatId, "migration.chatId");
+  const migrationId = requireDomainId(input.migrationId, "migration.migrationId");
+  const sourceKind = requireDomainId(
+    input.sourceKind || "legacy-graph",
+    "migration.sourceKind",
+  );
+  const converterVersion = requireDomainId(
+    input.converterVersion,
+    "migration.converterVersion",
+  );
+  const sourceFingerprint = requireDomainId(
+    input.sourceFingerprint,
+    "migration.sourceFingerprint",
+  );
+  const id = String(
+    input.id ||
+      createDomainId("migration", {
+        chatId,
+        migrationId,
+        sourceKind,
+        converterVersion,
+        sourceFingerprint,
+      }),
+  );
+  return {
+    ...baseRecord(MEMORY_RECORD_KIND.MIGRATION, {
+      ...input,
+      id,
+      chatId,
+    }),
+    migrationId,
+    sourceKind,
+    sourceVersion: String(input.sourceVersion || "").trim(),
+    converterVersion,
+    sourceFingerprint,
+    importedRecordIds: normalizeStringArray(input.importedRecordIds),
+    metadata: plainObject(input.metadata),
+  };
+}
+
 export function createLedgerCommitRecord(input = {}) {
   const chatId = requireDomainId(input.chatId, "commit.chatId");
   const revision = Number(input.revision);

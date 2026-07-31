@@ -195,7 +195,7 @@ const planner = await plannerService.publish({
   turnId: "turn:current",
   inputFingerprint,
   historyFingerprint,
-  expectedMemoryStateFingerprint: fingerprintMaterializedMemoryState(ledger),
+  expectedMemoryStateFingerprint: planned.artifact.memoryStateFingerprint,
   recallArtifactId: planned.artifact.id,
   selectedMemoryIds: [memory.memoryId],
   plotText: "Mira follows the opened gate into the archive.",
@@ -213,23 +213,18 @@ assert.equal(
   planned.artifact.id,
 );
 
-const wrongVersionPlanner = planTurnArtifactCommit(ledger, {
-  turnId: "turn:current",
-  artifactKind: TURN_ARTIFACT_KIND.PLANNER,
-  inputFingerprint: "input:wrong-version",
-  historyFingerprint: "history:wrong-version",
-  expectedMemoryStateFingerprint: fingerprintMaterializedMemoryState(ledger),
-  sourceArtifactIds: [planned.artifact.id],
-  contentText: "This plan must not attach to another recall version.",
-  now: 5.6,
-});
 assert.throws(
-  () => appendMemoryLedgerTransaction(ledger, wrongVersionPlanner.transaction),
-  (error) =>
-    Array.isArray(error?.issues) &&
-    error.issues.some((issue) =>
-      issue.includes("recall artifact from another turn version"),
-    ),
+  () => planTurnArtifactCommit(ledger, {
+    turnId: "turn:current",
+    artifactKind: TURN_ARTIFACT_KIND.PLANNER,
+    inputFingerprint: "input:wrong-version",
+    historyFingerprint: "history:wrong-version",
+    expectedMemoryStateFingerprint: planned.artifact.memoryStateFingerprint,
+    sourceArtifactIds: [planned.artifact.id],
+    contentText: "This plan must not attach to another recall version.",
+    now: 5.6,
+  }),
+  (error) => error?.code === "memory_ledger_conflict",
 );
 
 const memoryStateBeforeUnrelatedCommit = fingerprintMaterializedMemoryState(ledger);

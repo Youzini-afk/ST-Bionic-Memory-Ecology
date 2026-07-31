@@ -8,12 +8,15 @@ This page is split out from the [README](../../README.en.md) with ST-BME data st
 
 - Browser-local primary storage uses OPFS or IndexedDB according to capability and settings.
 - Data is isolated per chat; IndexedDB names look like `STBME_{chatId}`, while OPFS uses per-chat directories.
-- The hot path uses incremental commits to avoid replacing the whole graph.
-- On load, the graph is restored from the local database first.
+- The hot path incrementally commits an append-only memory ledger; graph, timeline, and vector state are rebuildable projections.
+- Loading restores that chat's ledger first. An old graph is imported once, atomically, only after its source load is confirmed complete.
+- Luker uses a dedicated `st_bme_memory_ledger_v1` chat-state namespace and never silently falls back to a browser-local store.
 
 ### Cloud mirroring
 
 Cloud Sync is the multi-device replication layer for browser-local IndexedDB / OPFS storage, not another primary storage mode. Authority SQL is already a shared primary and does not get a second Cloud Sync replica. Local commits remain valid offline; after reconnecting, each chat resumes upload, download, or merge under its own stable chat identity. It uses SillyTavern's existing file API and requires no custom backend route.
+
+Ledger metadata is not merged with ordinary last-writer overlay. An ancestor/descendant pair selects the descendant; compatible forks replay transactions deterministically into one legal chain; Agent event conflicts that cannot be proven safe stop the merge. A remote snapshot declaring another chatId is rejected before import.
 
 - Automatic mode:
   - A successful local write schedules the remote mirror; chat changes and returning to a visible page also check the remote copy.
@@ -32,11 +35,11 @@ SillyTavern's user-files API has no directory listing, conditional write, or con
 
 ### Compatibility and fallback
 
-- Old `chat_metadata.st_bme_graph` is only used as a migration and fallback source.
+- Old `chat_metadata.st_bme_graph` is only a one-time migration source; BME does not write a completed marker until the source load is confirmed.
 - shadow snapshot and metadata-full are recoverable anchors, not the preferred primary storage.
 - tombstone is used to sync deletion state and prevent old data from coming back.
 - Plugin settings are stored in SillyTavern's `extension_settings.st_bme`.
-- Message-level recall is stored in the corresponding user message's `message.extra.bme_recall`.
+- The corresponding user message's `message.extra.bme_recall` stores the visible, editable floor snapshot; durable Recall/Planner Artifacts live in that chat's memory ledger.
 
 ### Persistent recall cards
 
@@ -49,8 +52,8 @@ User messages with valid `message.extra.bme_recall` display recall cards:
 - Delete persistent recall.
 - Re-run recall and overwrite the record.
 
-Priority:
+Runtime rules:
 
-1. When a new recall succeeds in this round, use the new recall and write it back to the target user turn.
-2. When there is no new recall in this round, read persistent recall from the user turn corresponding to the current generation as fallback.
-3. When neither exists, clear the injection.
+1. A new user turn or an explicit manual re-recall runs the Recall Agent and writes both a ledger Artifact and the target user-turn cache.
+2. Reroll, swipe, and regenerate first validate the parent turn's durable Recall/Planner Artifacts, then reapply that turn's persisted injection text. A manual text edit is reusable only while those Artifacts remain valid.
+3. Missing or invalid Artifacts, or a chat switch during validation, fail closed: the current injection is cleared, recall is not rerun, and the message cache is never promoted into a durable result.

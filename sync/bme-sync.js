@@ -4,6 +4,10 @@ import {
   PROCESSED_MESSAGE_HASH_VERSION,
 } from "../runtime/runtime-state.js";
 import { createAuthorityBlobAdapter } from "../maintenance/authority-blob-adapter.js";
+import {
+  mergeMemoryLedgerSnapshotMeta,
+  withoutMemoryLedgerMeta,
+} from "../storage/memory-ledger-cloud-merge.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
@@ -1317,6 +1321,25 @@ function getRequestHeadersSafe(options = {}) {
     }
   }
   return {};
+}
+
+function assertDeclaredSyncChatId(payload = {}, expectedChatId = "", source = "snapshot") {
+  const expected = normalizeChatId(expectedChatId);
+  if (!expected) return;
+  const declared = [payload?.chatId, payload?.meta?.chatId]
+    .map(normalizeChatId)
+    .filter(Boolean);
+  const mismatch = declared.find((chatId) => chatId !== expected);
+  if (!mismatch) return;
+  throw Object.assign(
+    new Error(`Remote ${source} belongs to a different chat`),
+    {
+      code: "REMOTE_CHAT_ID_MISMATCH",
+      expectedChatId: expected,
+      actualChatId: mismatch,
+      source,
+    },
+  );
 }
 
 function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
@@ -2945,6 +2968,7 @@ async function readRemoteSnapshot(chatId, options = {}) {
         normalizeMs += Number(manifestResult?.timings?.normalizeMs || 0);
       } else {
         const normalizeStartedAt = readSyncTimingNow();
+        assertDeclaredSyncChatId(remotePayload, normalizedChatId, "legacy snapshot");
         snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
         normalizeMs += readSyncTimingNow() - normalizeStartedAt;
       }
@@ -2968,7 +2992,10 @@ async function readRemoteSnapshot(chatId, options = {}) {
       console.warn("[ST-BME] 解析远端同步文件失败:", error);
       return {
         exists: false,
-        status: "invalid-json",
+        status:
+          error?.code === "REMOTE_CHAT_ID_MISMATCH"
+            ? "remote-chat-id-mismatch"
+            : "invalid-json",
         filename,
         snapshot: null,
         error,
@@ -3006,6 +3033,7 @@ async function readRemoteJsonFile(filename, options = {}) {
 async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options = {}) {
   const readStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
+  assertDeclaredSyncChatId(manifest, normalizedChatId, "v2 manifest");
   const chunks = Array.isArray(manifest?.chunks) ? manifest.chunks : [];
   const nodes = [];
   const edges = [];
@@ -3042,6 +3070,7 @@ async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options 
   }
 
   const normalizeStartedAt = readSyncTimingNow();
+  assertDeclaredSyncChatId(runtimeMeta, normalizedChatId, "v2 runtime metadata");
   const snapshot = normalizeSyncSnapshot(
     {
       meta: {
@@ -4063,8 +4092,13 @@ export async function download(chatId, options = {}) {
 
 export function mergeSnapshots(localSnapshot, remoteSnapshot, options = {}) {
   const normalizedChatId = normalizeChatId(options.chatId || localSnapshot?.meta?.chatId || remoteSnapshot?.meta?.chatId);
+  assertDeclaredSyncChatId(localSnapshot, normalizedChatId, "local merge snapshot");
+  assertDeclaredSyncChatId(remoteSnapshot, normalizedChatId, "remote merge snapshot");
   const local = normalizeSyncSnapshot(localSnapshot, normalizedChatId);
   const remote = normalizeSyncSnapshot(remoteSnapshot, normalizedChatId);
+  const mergedMemoryLedger = mergeMemoryLedgerSnapshotMeta(local, remote, {
+    chatId: normalizedChatId,
+  });
 
   const mergedTombstoneIndex = buildTombstoneIndex([
     ...local.tombstones,
@@ -4227,8 +4261,9 @@ export function mergeSnapshots(localSnapshot, remoteSnapshot, options = {}) {
   );
 
   const mergedMeta = {
-    ...local.meta,
-    ...remote.meta,
+    ...withoutMemoryLedgerMeta(local.meta),
+    ...withoutMemoryLedgerMeta(remote.meta),
+    ...mergedMemoryLedger.meta,
     [RUNTIME_HISTORY_META_KEY]: mergedHistoryState,
     [RUNTIME_VECTOR_META_KEY]: mergedVectorState,
     [RUNTIME_BATCH_JOURNAL_META_KEY]: mergedBatchJournal,

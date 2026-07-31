@@ -18,25 +18,18 @@ This setting **does not** translate chat content, user input, AI replies, memory
 
 ### Memory LLM
 
-The memory LLM is used for:
-
-- Memory extraction.
-- Recall reranking.
-- Consolidation.
-- Compression.
-- Small summaries.
-- Summary rollup.
-- Reflection.
-- ENA Planner planning.
+The memory LLM is BME's dedicated Agent model. It powers the Memory Steward's
+extraction, reconciliation, and evolution, the Recall Agent, and ENA Planner.
 
 Configuration options:
 
 - **Leave blank**
-  - Reuse the current SillyTavern chat model.
+  - Agent work never falls back to the current SillyTavern chat model or DOA's model. Background work is deferred and foreground work reports a clear configuration error.
 
 - **Fill in OpenAI-compatible config**
-  - Use an independent model for memory tasks.
-  - Useful when you want to separate the main chat model from the background maintenance model.
+  - Use one independent model for all BME Agent work.
+  - Set the model's context window; BME compacts Agent context by tokens before reaching it.
+  - Background work defaults to 500 tool calls and eight minutes. Both runaway guards are configurable.
 
 Security recommendations:
 
@@ -64,39 +57,37 @@ Backend index mode reuses SillyTavern's embedding provider:
 
 > After switching embedding mode or model, run "rebuild vectors".
 
-### Extraction settings
+### Agent memory writes
 
-| Setting | Default | Description |
-| --- | --- | --- |
-| 每 N 条回复提取 | `1` | Trigger extraction every N assistant replies |
-| 提取上下文轮数 | `2` | Number of conversation rounds to look back during extraction |
-| 自动延后最新助手 | `false` | Allows the latest reply to stabilize before extraction |
-| Extraction pipeline version | `split-v1` | Default two-stage extraction: objective facts, then subjective/POV. Old custom extraction prompts automatically fall back to the legacy single-call path. |
-| Assistant 排除标签 | `think,analysis,reasoning` | Excludes reasoning tags by default |
-| 提取消息上限 | `0` | `0` means unlimited |
-| 提取 Prompt 结构模式 | `both` | Provides both transcript and structured messages |
-| 提取世界书模式 | `active` | Reuses the currently active world info context |
-| 包含故事时间 | `true` | Provides the story timeline during extraction |
-| 包含总结快照 | `true` | Provides active summaries during extraction |
-| 手动提取模式 | `pending` | Default extraction mode in the panel |
+After an assistant reply enters the chat, BME first stores it as immutable
+evidence and admits durable work, then wakes the Memory Steward in the
+background. The Steward decides from the evidence and current memory whether
+to extract, revise, reconcile, summarize, archive, or explicitly make no
+change. These capabilities no longer run as mandatory stages on fixed counts
+or similarity thresholds.
+
+- Tags such as `think`, `analysis`, and `reasoning` are still cleaned before Agent input.
+- Generation and recall never wait for background work; they read the latest committed ledger version.
+- Manual “extract”, “compress”, or “evolve” actions submit a background intent to the Steward instead of starting a second legacy writer.
+- Every publish validates source evidence and read dependencies in one per-chat transaction.
 
 ### Recall settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| 启用召回 | `true` | Automatically retrieve memories before generation |
-| 向量预筛 | `true` | Use embedding to find candidates first |
-| 图扩散 | `true` | Diffuse along graph relations to related nodes |
-| LLM 精排 | `true` | Let the LLM select final results from candidates |
-| 召回 Top-K | `20` | Vector prefilter count |
-| 最终节点上限 | `12` | Maximum number of nodes kept before injection |
-| 图扩散 Top-K | `100` | Graph diffusion candidate count |
-| LLM 候选池 | `30` | Candidate pool size for reranking |
-| 多意图拆分 | `true` | Split one input into multiple retrieval intents |
-| 上下文混合查询 | `true` | Blend the current input, previous assistant reply, and previous user message |
-| 词法增强 | `true` | Weight exact keyword matches |
-| 时序链接 | `true` | Mutually boost temporally nearby nodes |
-| 多样性采样 | `true` | Avoid overly homogeneous recall results |
+| Enable recall | `true` | Automatically retrieve memories before generation |
+| Vector prefilter | `true` | Use embedding to find candidates first |
+| Graph diffusion | `true` | Diffuse along graph relations to related nodes |
+| Recall Agent | `true` | Start from fast candidates, query deeper when needed, and publish the result |
+| Recall Top-K | `20` | Vector prefilter count |
+| Final memory limit | `12` | Maximum number of nodes kept before injection |
+| Diffusion Top-K | `100` | Graph diffusion candidate count |
+| Agent candidate pool | `30` | Initial candidate packet size |
+| Multi-intent queries | `true` | Split one input into multiple retrieval intents |
+| Context-blended query | `true` | Blend the current input, previous assistant reply, and previous user message |
+| Lexical boost | `true` | Weight exact keyword matches |
+| Temporal links | `true` | Mutually boost temporally nearby nodes |
+| Diversity sampling | `true` | Avoid overly homogeneous recall results |
 
 ### Cognitive and spatial settings
 
@@ -104,38 +95,41 @@ Backend index mode reuses SillyTavern's embedding provider:
 | --- | --- | --- |
 | Scoped Memory | `true` | Enable scoped memory |
 | POV Memory | `true` | Enable character/user POV memory |
-| 区域目标 | `true` | Distinguish current region, adjacent regions, and global |
-| 认知记忆 | `true` | Enable subjective/objective cognitive attribution |
-| 空间邻接 | `true` | Allow adjacency relations between regions |
-| 故事时间线 | `true` | Enable story timeline tags |
-| 注入故事时间标签 | `true` | Hint the current story time in injection |
-| 软时间引导 | `true` | Guide by prompting, without forcing rewrites |
+| Region targeting | `true` | Distinguish current region, adjacent regions, and global |
+| Cognitive memory | `true` | Enable subjective/objective cognitive attribution |
+| Spatial adjacency | `true` | Allow adjacency relations between regions |
+| Story timeline | `true` | Enable story timeline tags |
+| Inject story-time tags | `true` | Hint the current story time in injection |
+| Soft time guidance | `true` | Guide by prompting, without forcing rewrites |
 
-### Maintenance settings
+### Agent runtime settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| 启用整合 | `true` | Similar/conflicting memory analysis and merge |
-| 整合阈值 | `0.85` | Similarity trigger threshold |
-| 启用小总结 | `true` | Compatible with the old `synopsis` name |
-| 启用层级总结 | `true` | Use a small summary + rollup summary system |
-| 小总结频率 | `3` | Generate a small summary every N extractions |
-| 总结折叠扇入 | `3` | Roll up summaries when this many exist at the same layer |
-| 启用智能触发 | `false` | Enhance extraction only in high-information scenes |
-| 启用主动遗忘 | `false` | Periodically lower the priority of low-value nodes |
-| 启用概率召回 | `false` | Allow a small number of weakly related memories to enter by probability |
-| 启用反思 | `true` | Periodically summarize long-term trends |
-| 启用自动压缩 | `true` | Compress similar memories by extraction cycle |
+| Context window | `128000` tokens | Model context available to BME Agents; context is summarized and compacted by tokens before the limit |
+| Background tool-call limit | `500` | Runaway guard for one Memory Steward task |
+| Background run limit | `8` minutes | Runaway guard for one background Agent task |
+| Probabilistic recall | `false` | Allow a small number of weak candidates into the programmatic candidate packet |
+
+Extraction, reconciliation, summarization, relation repair, and forgetting are
+chosen by the Memory Steward from current evidence and memory state. Generation
+and recall never wait for maintenance: completed work is visible immediately,
+while unfinished work leaves the current committed graph usable.
 
 ### Task presets and regex cleanup
 
 Task preset types:
 
+The live memory writer and recall path are owned by Agent tool loops. Task
+profiles still customize generation parameters, regex, world info, and EJS
+context, and remain available to ENA and explicit tool capabilities; they no
+longer form a fixed per-turn pipeline.
+
 - **`extract`**
   - Memory extraction.
 
 - **`extract_objective` / `extract_subjective`**
-  - Objective and subjective/POV stages for the default `split-v1` extraction pipeline. This version only splits task type and commit boundaries; it does not rewrite prompt text here. Old custom `extract` prompts/profiles automatically fall back to the legacy single-call path.
+  - Objective and subjective/POV templates available to explicit extraction tools; they are not mandatory two-stage work on every turn.
 
 - **`recall`**
   - Recall reranking.
@@ -176,14 +170,14 @@ ENA Planner is now integrated through the `planner` task preset. For deeper impl
 - World info blocks.
 - Recent chat blocks.
 - BME recalled memory blocks.
-- Historical `<plot>` blocks.
+- Structured, persisted historical `<plot>` blocks.
 - Current player input blocks.
 
 Recommendations:
 
 - Explicitly enable ENA and select a BME LLM preset under "Config → ENA Planner"; leave it empty to follow the current global BME LLM.
 - Adjust the only active planning prompt structure and generation parameters under "Config → Task presets → planner".
-- Reroll never runs ENA again; it reuses the parent user turn's persisted recall.
+- Reroll reruns neither recall nor ENA; it reuses the parent user turn's persisted Recall and Planner Artifacts.
 
 ### Hide old turns and render limit
 

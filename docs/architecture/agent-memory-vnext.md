@@ -115,10 +115,54 @@ prompt placement, Regex, MVU, TavernHelper, Luker, group generation, or branch
 payloads. Domain and Agent code use stable chat, turn, message-version, and
 generation identities supplied by the host adapter.
 
+## Released runtime composition
+
+`MemoryLifecycleRuntime` is the single production owner of a selected chat's
+ledger, history reconciliation, Recall Agent, Memory Steward, Planner
+Artifacts, branching, and manual memory mutations. SillyTavern events first
+capture a stable conversation snapshot and then call this lifecycle; the graph
+and panel receive only a materialized projection after a successful commit.
+Switching chats replaces the active lifecycle, while a late task keeps writing
+to its frozen origin repository and is barred from publishing into the newly
+active UI.
+
+Existing graph data is imported once through one atomic migration transaction.
+The transaction contains evidence, memory and relation revisions plus a
+migration marker, so a partial conversion can never become authoritative and a
+completed conversion is never repeated. Evidence that cannot be tied to a
+historical assistant turn is marked as external to history reconciliation
+rather than being incorrectly invalidated on the next load.
+
+The physical stores preserve the same ledger semantics:
+
+- Standard SillyTavern stores immutable ledger records in the per-chat
+  conversation repository beside the rebuildable graph projection.
+- Luker stores the ledger in the dedicated `st_bme_memory_ledger_v1`
+  chat-state namespace with revision CAS. It never falls back to browser-local
+  storage, which would silently split one chat into two authorities.
+- Cloud Sync removes ledger keys from generic metadata overlay. It selects the
+  descendant when one ledger contains the other, deterministically replays
+  compatible divergent transactions, and rejects conflicting Agent event
+  chains rather than manufacturing a winner.
+
+ENA and ordinary generation call the same Recall Agent entry point. ENA keeps
+the resulting Recall Artifact through the planner handoff; after SillyTavern
+binds the user floor, BME publishes the Planner Artifact against that exact
+turn. A reroll reads this durable pair. It does not rerun retrieval or planning,
+and an `empty` Recall Artifact remains a valid reusable result.
+
+Manual edit, graph import, whole-graph clear, range clear, and archive operations
+are ledger transactions too. Import replaces the active ledger snapshot;
+clear operations append auditable archive revisions. UI controls do not mutate
+the compatibility graph directly. Background Steward progress uses
+its own status channel, so it neither lengthens the foreground extraction
+notice nor blocks generation and recall.
+
 ## Cutover rule
 
 Development may compare the old and new cores in tests, but the released
-runtime has one owner for each behavior. After product-contract parity, the old
-extraction, maintenance, recall, and history mutation paths are removed rather
-than retained as a fallback. Any old-data support is a one-time importer outside
-the live runtime.
+runtime has one owner for each behavior. The old extraction and maintenance
+implementations may remain as import/build-time modules while migration is
+settling, but SillyTavern lifecycle events and exposed maintenance actions do
+not run them as a second live writer or fallback. Any old-data support is a
+one-time importer outside the live runtime.

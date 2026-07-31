@@ -158,10 +158,69 @@ export function planTurnArtifactCommit(
     };
   }
   const view = materializeMemoryLedger(ledger);
+  const index = buildMemoryLedgerIndex(ledger);
   const currentMemoryStateFingerprint = fingerprintMaterializedMemoryState(view);
+  const normalizedArtifactKind = String(artifactKind || TURN_ARTIFACT_KIND.RECALL);
+  const normalizedSourceArtifactIds = normalizeStringArray(sourceArtifactIds);
+  let artifactMemoryStateFingerprint = currentMemoryStateFingerprint;
+  let selectedIds = normalizeStringArray(selectedMemoryIds);
+  let candidateIds = normalizeStringArray(candidateMemoryIds);
+  let selectedHeads = [];
+
+  if (normalizedArtifactKind === TURN_ARTIFACT_KIND.PLANNER) {
+    const recallArtifact = normalizedSourceArtifactIds
+      .map((artifactId) => index.recordsById.get(artifactId))
+      .find(
+        (record) =>
+          record?.artifactKind === TURN_ARTIFACT_KIND.RECALL &&
+          record.turnId === turnId &&
+          record.inputFingerprint === inputFingerprint &&
+          String(record.historyFingerprint || "") === String(historyFingerprint || ""),
+      );
+    const recallValidation = recallArtifact
+      ? view.turnArtifacts.validationByArtifactId.get(recallArtifact.id)
+      : null;
+    if (!recallArtifact || recallValidation?.valid !== true) {
+      throw new MemoryLedgerConflictError(
+        "planner artifact requires an active Recall artifact for the same turn version",
+        { sourceArtifactIds: normalizedSourceArtifactIds },
+      );
+    }
+    artifactMemoryStateFingerprint = String(recallArtifact.memoryStateFingerprint || "");
+    if (
+      String(expectedMemoryStateFingerprint || "") !==
+      artifactMemoryStateFingerprint
+    ) {
+      throw new MemoryLedgerConflictError(
+        "planner artifact memory snapshot does not match its Recall artifact",
+        {
+          expectedMemoryStateFingerprint: String(expectedMemoryStateFingerprint || ""),
+          recallMemoryStateFingerprint: artifactMemoryStateFingerprint,
+        },
+      );
+    }
+    const recalledMemoryIds = normalizeStringArray(recallArtifact.selectedMemoryIds).sort();
+    const requestedMemoryIds = [...selectedIds].sort();
+    if (
+      requestedMemoryIds.length > 0 &&
+      requestedMemoryIds.join("\u0000") !== recalledMemoryIds.join("\u0000")
+    ) {
+      throw new MemoryLedgerConflictError(
+        "planner artifact selected memories differ from its Recall artifact",
+        { requestedMemoryIds, recalledMemoryIds },
+      );
+    }
+    selectedIds = normalizeStringArray(recallArtifact.selectedMemoryIds);
+    candidateIds = normalizeStringArray(recallArtifact.candidateMemoryIds);
+  } else {
+    selectedHeads = selectedIds.map((memoryId) =>
+      view.memories.byMemoryId.get(memoryId),
+    );
+  }
+
   if (
-    String(expectedMemoryStateFingerprint || "") !==
-    currentMemoryStateFingerprint
+    normalizedArtifactKind !== TURN_ARTIFACT_KIND.PLANNER &&
+    String(expectedMemoryStateFingerprint || "") !== currentMemoryStateFingerprint
   ) {
     throw new MemoryLedgerConflictError(
       "memory state changed before the turn artifact was published",
@@ -171,13 +230,12 @@ export function planTurnArtifactCommit(
       },
     );
   }
-  const selectedIds = normalizeStringArray(selectedMemoryIds);
   const resolvedContentText = String(contentText ?? injectionText).trim();
-  const selectedHeads = selectedIds.map((memoryId) =>
-    view.memories.byMemoryId.get(memoryId),
-  );
   const missingMemoryIds = selectedIds.filter((_, index) => !selectedHeads[index]);
-  if (missingMemoryIds.length > 0) {
+  if (
+    normalizedArtifactKind !== TURN_ARTIFACT_KIND.PLANNER &&
+    missingMemoryIds.length > 0
+  ) {
     throw new MemoryLedgerConflictError(
       "selected memories changed before the turn artifact was published",
       { missingMemoryIds },
@@ -189,13 +247,13 @@ export function planTurnArtifactCommit(
     artifactKind,
     inputFingerprint,
     historyFingerprint,
-    memoryStateFingerprint: currentMemoryStateFingerprint,
+    memoryStateFingerprint: artifactMemoryStateFingerprint,
     status: resolvedContentText
       ? TURN_ARTIFACT_STATUS.READY
       : TURN_ARTIFACT_STATUS.EMPTY,
     selectedMemoryIds: selectedIds,
-    candidateMemoryIds,
-    sourceArtifactIds,
+    candidateMemoryIds: candidateIds,
+    sourceArtifactIds: normalizedSourceArtifactIds,
     contentText: resolvedContentText,
     injectionText,
     evidenceIds,
@@ -218,7 +276,7 @@ export function planTurnArtifactCommit(
       records: [artifact],
       readRecordIds: normalizeStringArray([
         ...dependencyRevisionIds,
-        ...sourceArtifactIds,
+        ...normalizedSourceArtifactIds,
         ...selectedHeads.filter(Boolean).map((revision) => revision.id),
       ]),
       sourceEvidenceIds: normalizeStringArray(evidenceIds),

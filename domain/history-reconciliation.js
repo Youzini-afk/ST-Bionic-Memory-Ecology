@@ -107,6 +107,20 @@ function createCandidateEvidence(chatId, turn, turnId, now) {
   });
 }
 
+export function createHistoryTurnId({
+  chatId,
+  previousTurnId = "root",
+  normalizedUserText = "",
+  occurrence = 1,
+} = {}) {
+  return createDomainId("turn", {
+    chatId: String(chatId || "").trim(),
+    previousTurnId: String(previousTurnId || "root").trim() || "root",
+    user: String(normalizedUserText || "").trim(),
+    occurrence: Math.max(1, Math.floor(Number(occurrence) || 1)),
+  });
+}
+
 export function assignHistoryTurnIds(ledger, turns = [], { now = Date.now() } = {}) {
   const normalizedTurns = turns.map(normalizeTurn).filter(Boolean);
   const index = buildMemoryLedgerIndex(ledger);
@@ -158,13 +172,10 @@ export function assignHistoryTurnIds(ledger, turns = [], { now = Date.now() } = 
     const turnId = String(
       turn.turnId ||
         matched?.turnId ||
-        createDomainId("turn", {
+        createHistoryTurnId({
           chatId: ledger.chatId,
-          hostTurnKey: turn.hostTurnKey,
-          logicalSlotKey: turn.logicalSlotKey,
           previousTurnId,
-          user: turn.normalizedUserText,
-          speaker: turn.speaker,
+          normalizedUserText: turn.normalizedUserText,
           occurrence,
         }),
     );
@@ -178,6 +189,50 @@ export function assignHistoryTurnIds(ledger, turns = [], { now = Date.now() } = 
     });
   }
   return assigned;
+}
+
+export function resolveHistoryTurn(
+  ledger,
+  turns = [],
+  {
+    userFloor = null,
+    userMessage = "",
+    now = Date.now(),
+  } = {},
+) {
+  const assigned = assignHistoryTurnIds(ledger, turns, { now });
+  const normalizedUser = String(userMessage || "").replace(/\r\n?/g, "\n").trim();
+  const normalizedFloor = Number.isFinite(Number(userFloor))
+    ? Math.floor(Number(userFloor))
+    : null;
+  const completed = [...assigned].reverse().find((turn) => {
+    if (normalizedFloor !== null && Number(turn.userFloor) !== normalizedFloor) return false;
+    return !normalizedUser || turn.normalizedUserText === normalizedUser;
+  });
+  if (completed) return { ...completed, pending: false };
+
+  const occurrences = new Map();
+  for (const turn of assigned) {
+    occurrences.set(
+      turn.normalizedUserText,
+      (occurrences.get(turn.normalizedUserText) || 0) + 1,
+    );
+  }
+  const occurrence = (occurrences.get(normalizedUser) || 0) + 1;
+  return {
+    turnId: createHistoryTurnId({
+      chatId: ledger.chatId,
+      previousTurnId: assigned.at(-1)?.turnId || "root",
+      normalizedUserText: normalizedUser,
+      occurrence,
+    }),
+    userText: String(userMessage || ""),
+    normalizedUserText: normalizedUser,
+    userFloor: normalizedFloor,
+    assistantFloor: null,
+    occurrence,
+    pending: true,
+  };
 }
 
 export function planHistoryReconciliation(
@@ -215,6 +270,11 @@ export function planHistoryReconciliation(
   const inboxState = view.inbox;
 
   for (const evidence of view.evidence.activeEvidence) {
+    // Imported memories whose original dialogue can no longer be matched are
+    // still valid legacy evidence. They are immutable provenance, not a live
+    // SillyTavern history row, so deleting/editing chat rows must not retire
+    // them during the first reconciliation after migration.
+    if (evidence?.metadata?.historyManaged === false) continue;
     if (desiredById.has(evidence.id)) continue;
     records.push(
       createEvidenceInvalidation({

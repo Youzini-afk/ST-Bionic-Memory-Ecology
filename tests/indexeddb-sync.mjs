@@ -1318,6 +1318,63 @@ async function testDownloadImport() {
   );
 }
 
+async function testRemoteChatIdentityMismatchIsRejected() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-remote-id-guard";
+  const db = new FakeDb(chatId);
+  dbByChatId.set(chatId, db);
+  const filename = `ST-BME_sync_${chatId}.json`;
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+
+  remoteFiles.set(filename, {
+    meta: { chatId: "chat-foreign", revision: 4, lastModified: 4 },
+    nodes: [{ id: "foreign-node" }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: -1, extractionCount: 0 },
+  });
+  const legacyResult = await download(chatId, runtime);
+  assert.equal(legacyResult.downloaded, false);
+  assert.equal(legacyResult.reason, "remote-chat-id-mismatch");
+  assert.equal(db.lastImportPayload, null);
+
+  const runtimeChunk = `ST-BME_sync_${chatId}.__runtime-meta.000.identityguard.json`;
+  remoteFiles.set(filename, {
+    kind: "st-bme-sync",
+    formatVersion: 2,
+    chatId,
+    meta: { chatId, revision: 5, lastModified: 5 },
+    state: { lastProcessedFloor: -1, extractionCount: 0 },
+    chunks: [{ kind: "runtime-meta", index: 0, count: 1, filename: runtimeChunk }],
+  });
+  remoteFiles.set(runtimeChunk, {
+    kind: "runtime-meta",
+    index: 0,
+    records: [{ chatId: "chat-foreign", revision: 5 }],
+  });
+  const v2Result = await download(chatId, runtime);
+  assert.equal(v2Result.downloaded, false);
+  assert.equal(v2Result.reason, "remote-chat-id-mismatch");
+  assert.equal(db.lastImportPayload, null);
+
+  assert.throws(
+    () =>
+      mergeSnapshots(
+        { meta: { chatId }, nodes: [], edges: [], tombstones: [], state: {} },
+        {
+          meta: { chatId: "chat-foreign" },
+          nodes: [{ id: "foreign-node" }],
+          edges: [],
+          tombstones: [],
+          state: {},
+        },
+        { chatId },
+      ),
+    (error) => error?.code === "REMOTE_CHAT_ID_MISMATCH",
+  );
+}
+
 async function testLegacyRemoteFilenameFallbackMigratesWritesToStableName() {
   const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
   const dbByChatId = new Map();
@@ -2918,6 +2975,7 @@ async function main() {
   await testUserFilesHeadReadsOnlyUserFilesChunks();
   await testAuthorityFailOpenGcStaysOnUserFiles();
   await testDownloadImport();
+  await testRemoteChatIdentityMismatchIsRejected();
   await testLegacyRemoteFilenameFallbackMigratesWritesToStableName();
   await testMergeRules();
   await testMergeRuntimeMetaPolicies();

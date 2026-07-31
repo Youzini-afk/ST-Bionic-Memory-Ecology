@@ -8279,3 +8279,21 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+.bme-capability-card:has(#bme-setting-extract-auto-enabled),
+#bme-maintenance-mode-card,
+.bme-capability-card:has(#bme-setting-consolidation-enabled),
+.bme-capability-card:has(#bme-setting-synopsis-enabled),
+.bme-capability-card:has(#bme-setting-smart-trigger-enabled),
+.bme-capability-card:has(#bme-setting-sleep-cycle-enabled),
+.bme-capability-card:has(#bme-setting-auto-compression-enabled),
+.bme-capability-card:has(#bme-setting-reflection-enabled),
+.bme-stripe-row:has(#bme-setting-extract-every),
+.bme-stripe-row:has(#bme-setting-consolidation-neighbor-count),
+.bme-stripe-row:has(#bme-setting-synopsis-every),
+.bme-stripe-row:has(#bme-setting-trigger-patterns),
+.bme-stripe-row:has(#bme-setting-forget-threshold),
+.bme-stripe-row:has(#bme-setting-consolidation-auto-min-new-nodes),
+.bme-stripe-row:has(#bme-setting-compression-every),
+.bme-stripe-row:has(#bme-setting-reflect-every) {
+  display: none !important;
+}

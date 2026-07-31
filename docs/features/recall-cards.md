@@ -1,6 +1,6 @@
 # 持久召回卡片
 
-召回卡片是挂在聊天消息上的 UI 元素，显示"这条消息生成时召回了哪些记忆"。它既是用户可见的透明度功能，也是 reroll 复用的存储载体。
+召回卡片是挂在聊天消息上的 UI 元素，显示“这条消息生成时召回了哪些记忆”。它是用户可见、可编辑的楼层快照；真正授权 reroll 复用的是该聊天记忆账本中的耐久 Recall / Planner Artifact。
 
 实现：`ui/recall-message-ui.js`、`ui/recall-message-ui-controller.js`、`retrieval/recall-persistence.js`。
 
@@ -15,15 +15,15 @@
 两个目的：
 
 1. **透明度**：用户能看到记忆系统在每轮"想起了什么"。
-2. **reroll 复用**：reroll 助手楼层时，如果上方用户楼层没变，before-combine 会把父 user 楼层 `message.extra.bme_recall` 中的召回块确定性重放，跳过新检索。详见 [`../architecture/control-plane.md`](../architecture/control-plane.md) 的 reroll 不变量和 [`../algorithms/retrieval.md`](../algorithms/retrieval.md) 的持久复用。
+2. **reroll 复用**：reroll 助手楼层时，before-combine 先按 turn / input / history 指纹验证父 user 楼层对应的耐久 Artifact 对。只有验证成功，才重放该楼层的注入快照并跳过 Recall 与 ENA；缺失或失效时直接 fail-closed。
 
 ## 存储边界
 
-召回卡片是**每个用户楼层可编辑的召回存储**，不是永久世界书条目。reroll 复用读取的是 `message.extra.bme_recall` 里的独立召回块，不会把内容写成长期 worldbook，也不会破坏性覆盖用户原文。
+召回卡片是**每个用户楼层可编辑的 UI 快照**，不是永久世界书条目，也不是独立的记忆主存储。`message.extra.bme_recall` 保存展示和注入文本；记忆账本 Artifact 保存该回合可否复用、用了哪版记忆及其依赖。两者必须同时有效，消息缓存不能自行升级为耐久结果。
 
-用户输入文本和召回注入块始终是两件事：用户楼层 `mes` 保留原始输入；召回内容作为单独 block 注入提示词。用户编辑召回卡片只改变该楼层的召回 artifact，不等同于改写用户说过的话。
+用户输入文本和召回注入块始终是两件事：用户楼层 `mes` 保留原始输入；召回内容作为单独 block 注入提示词。用户编辑卡片只改变该楼层的注入快照，不会改写用户原文，也不会伪造或替换账本 Artifact；Artifact 仍合法时，reroll 可以复用这份人工调整过的文本。
 
-如果面板图谱当前可见，召回记录还会驱动一次短暂的节点高亮，让用户看到本轮召回关联了哪些记忆节点。这个高亮只存在于渲染层；持久存储边界仍然是消息上的 `message.extra.bme_recall`。
+如果面板图谱当前可见，召回记录还会驱动一次短暂的节点高亮，让用户看到本轮召回关联了哪些记忆节点。这个高亮只存在于渲染层；消息快照与账本 Artifact 都按聊天记录隔离。
 
 ## 控制器封装
 

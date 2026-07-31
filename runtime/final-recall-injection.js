@@ -1,4 +1,5 @@
 import {
+  BME_RECALL_VERSION,
   buildRecallHistoryFingerprint,
   validatePersistedRecallForUserMessage,
 } from "../retrieval/recall-persistence.js";
@@ -42,6 +43,9 @@ export function createFinalRecallInjection(deps = {}) {
     const record = deps.buildPersistedRecallRecord(
       {
         ...payload,
+        artifactHistoryFingerprint: String(
+          payload.artifactHistoryFingerprint || payload.historyFingerprint || "",
+        ),
         boundUserFloorText: targetUserFloorText,
         historyFingerprint: buildRecallHistoryFingerprint(
           chat,
@@ -134,6 +138,7 @@ export function createFinalRecallInjection(deps = {}) {
         artifactId: String(result?.artifactId || ""),
         turnId: String(result?.turnId || ""),
         inputFingerprint: String(result?.inputFingerprint || ""),
+        artifactHistoryFingerprint: String(result?.historyFingerprint || ""),
         memoryStateFingerprint: String(result?.memoryStateFingerprint || ""),
       },
     );
@@ -283,6 +288,62 @@ export function createFinalRecallInjection(deps = {}) {
       existingRecord,
     );
     if (existingRecord?.manuallyEdited && existingValidation.valid) {
+      const refreshedRecord = {
+        ...existingRecord,
+        version: BME_RECALL_VERSION,
+        boundUserFloorText: targetUserFloorText,
+        historyFingerprint: nextHistoryFingerprint,
+        artifactId: String(recallResult?.artifactId || existingRecord.artifactId || ""),
+        turnId: String(recallResult?.turnId || existingRecord.turnId || ""),
+        inputFingerprint: String(
+          recallResult?.inputFingerprint || existingRecord.inputFingerprint || "",
+        ),
+        artifactHistoryFingerprint: String(
+          recallResult?.historyFingerprint ||
+            existingRecord.artifactHistoryFingerprint ||
+            "",
+        ),
+        memoryStateFingerprint: String(
+          recallResult?.memoryStateFingerprint ||
+            existingRecord.memoryStateFingerprint ||
+            "",
+        ),
+        candidateNodeIds:
+          recallResult?.candidateMemoryIds ||
+          recallResult?.candidateNodeIds ||
+          existingRecord.candidateNodeIds ||
+          [],
+        updatedAt: new Date().toISOString(),
+      };
+      const metadataChanged = [
+        "version",
+        "boundUserFloorText",
+        "historyFingerprint",
+        "artifactId",
+        "turnId",
+        "inputFingerprint",
+        "artifactHistoryFingerprint",
+        "memoryStateFingerprint",
+      ].some(
+        (key) => String(refreshedRecord[key] ?? "") !== String(existingRecord[key] ?? ""),
+      );
+      if (
+        metadataChanged &&
+        deps.writePersistedRecallToUserMessage(
+          chat,
+          targetUserMessageIndex,
+          refreshedRecord,
+        )
+      ) {
+        deps.triggerChatMetadataSave(getContext(), { immediate: false });
+        deps.schedulePersistedRecallMessageUiRefresh();
+        return {
+          persisted: true,
+          reason: "manual-edit-artifact-metadata-refreshed",
+          targetUserMessageIndex,
+          record: refreshedRecord,
+        };
+      }
       return {
         persisted: false,
         reason: "manual-edit-preserved",
@@ -343,6 +404,9 @@ export function createFinalRecallInjection(deps = {}) {
         artifactId: String(recallResult?.artifactId || ""),
         turnId: String(recallResult?.turnId || ""),
         inputFingerprint: String(recallResult?.inputFingerprint || ""),
+        artifactHistoryFingerprint: String(
+          recallResult?.historyFingerprint || "",
+        ),
         memoryStateFingerprint: String(
           recallResult?.memoryStateFingerprint || "",
         ),
@@ -523,6 +587,95 @@ export function createFinalRecallInjection(deps = {}) {
       path: "",
       field: "",
       reason: "prompt-payload-unavailable",
+    };
+  }
+
+  function clearRecallPayloadInjection(promptData = null) {
+    const markerPattern = /\[BEGIN ST-BME MEMORY CONTEXT\][\s\S]*?\[END ST-BME MEMORY CONTEXT\]\s*/g;
+    let removed = 0;
+    const finalMesSend = Array.isArray(promptData?.finalMesSend)
+      ? promptData.finalMesSend
+      : [];
+    for (const entry of finalMesSend) {
+      if (!entry || typeof entry !== "object" || !Array.isArray(entry.extensionPrompts)) {
+        continue;
+      }
+      const next = [];
+      for (const chunk of entry.extensionPrompts) {
+        const text = String(chunk || "");
+        const cleared = text.replace(markerPattern, "").trim();
+        if (cleared !== text.trim()) removed += 1;
+        if (cleared) next.push(cleared);
+      }
+      entry.extensionPrompts = next;
+    }
+    for (const field of ["combinedPrompt", "prompt"]) {
+      if (typeof promptData?.[field] !== "string") continue;
+      const before = promptData[field];
+      const after = before.replace(markerPattern, "").trimStart();
+      if (after !== before) {
+        promptData[field] = after;
+        removed += 1;
+      }
+    }
+    return {
+      applied: removed > 0,
+      removed,
+      reason: removed > 0 ? "fail-closed-payload-cleared" : "no-payload-injection-found",
+    };
+  }
+
+  function clearFinalRecallInjectionFailClosed({
+    expectedChatId = "",
+    promptData = null,
+    reason = "durable-turn-artifacts-unavailable",
+    hookName = "",
+  } = {}) {
+    // `promptData` belongs to the generation that requested validation, so it
+    // is always safe to scrub. Global/module state is only touched while the
+    // originating chat is still current.
+    const rewrite = clearRecallPayloadInjection(promptData);
+    const normalizedExpectedChatId = String(expectedChatId || "").trim();
+    const isCurrent = Boolean(
+      normalizedExpectedChatId &&
+        typeof deps.isRecallChatIdCurrent === "function" &&
+        deps.isRecallChatIdCurrent(normalizedExpectedChatId) === true,
+    );
+    let transport = {
+      applied: false,
+      source: "none",
+      mode: "none",
+    };
+    if (isCurrent) {
+      transport = deps.applyModuleInjectionPrompt("", getSettings()) || transport;
+      setLastInjectionContent("");
+      deps.recordInjectionSnapshot?.("recall", {
+        taskType: "recall",
+        source: "durable-artifact-guard",
+        sourceLabel: "耐久产物校验",
+        reason: String(reason || "durable-turn-artifacts-unavailable"),
+        hookName: String(hookName || ""),
+        selectedNodeIds: [],
+        injectionText: "",
+        applicationMode: "fail-closed",
+        transport,
+        rewrite,
+        sourceKind: "none",
+      });
+      deps.refreshPanelLiveState?.();
+    }
+    return {
+      source: "none",
+      isFallback: false,
+      targetUserMessageIndex: null,
+      usedText: "",
+      deliveryMode: "none",
+      applicationMode: "fail-closed",
+      rewrite,
+      transport,
+      cleared: isCurrent || rewrite.applied,
+      stale: !isCurrent,
+      reason: String(reason || "durable-turn-artifacts-unavailable"),
     };
   }
 
@@ -1156,6 +1309,7 @@ export function createFinalRecallInjection(deps = {}) {
     bindGenerationRecallTransactionToUserMessage,
     rewriteRecallPayloadWithInjection,
     rewriteRecallPayloadWithAuthoritativeUserInput,
+    clearFinalRecallInjectionFailClosed,
     reapplyPersistedRecallBlock,
     applyFinalRecallInjectionForGeneration,
     getLastInjectionContent,

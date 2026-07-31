@@ -8,12 +8,15 @@
 
 - 本地主存储按能力与设置使用 OPFS 或 IndexedDB。
 - 数据按聊天隔离；IndexedDB 命名类似 `STBME_{chatId}`，OPFS 使用独立聊天目录。
-- 热路径使用增量提交，避免整图替换。
-- 加载时优先从本地数据库恢复图谱。
+- 热路径增量提交 append-only 记忆账本；图谱、时间线与向量状态是可重建投影。
+- 加载时先恢复该聊天账本；旧图谱只在确认加载完成后执行一次原子导入。
+- Luker 使用独立 `st_bme_memory_ledger_v1` chat-state，不会在失败时静默改写浏览器本地库。
 
 ### 云端镜像
 
 Cloud Sync 是浏览器 IndexedDB / OPFS 本地主存储的多设备复制层，不是另一种主存储。Authority SQL 已经是共享主源，启用它时不会再叠加 Cloud Sync。离线时本地提交仍然有效；恢复联网后，每张聊天记录按自己的稳定聊天身份继续上传、下载或合并。它使用 SillyTavern 已有文件 API，不需要自定义后端路由。
+
+合并时，账本不会被当作普通 metadata 覆盖：祖先/后代直接取后代，兼容分叉按确定顺序重放事务并重建合法链，无法证明安全的 Agent 事件冲突会停止合并。远端声明的 chatId 不一致时也会拒绝导入。
 
 - 自动模式：
   - 本地写入成功后调度远端镜像；切换聊天或页面重新可见时也会检查远端。
@@ -32,11 +35,11 @@ SillyTavern 的 user-files API 没有目录枚举、条件写入或条件删除�
 
 ### 兼容与兜底
 
-- 旧版 `chat_metadata.st_bme_graph` 仅作为迁移和兜底来源。
+- 旧版 `chat_metadata.st_bme_graph` 仅作为一次迁移来源；未确认加载完成时不会写“已迁移”标记。
 - shadow snapshot 和 metadata-full 是 recoverable 锚点，不是首选主存储。
 - tombstone 用于同步删除状态，避免旧数据复活。
 - 插件设置存放在 SillyTavern 的 `extension_settings.st_bme`。
-- 消息级召回存放在对应用户消息的 `message.extra.bme_recall`。
+- 对应用户消息的 `message.extra.bme_recall` 保存可见、可编辑的楼层召回快照；耐久 Recall / Planner Artifact 存放在该聊天的记忆账本。
 
 ### 持久召回卡片
 
@@ -49,8 +52,8 @@ SillyTavern 的 user-files API 没有目录枚举、条件写入或条件删除�
 - 可删除持久召回。
 - 可重新召回并覆盖记录。
 
-优先级：
+运行规则：
 
-1. 本轮有新召回成功时，使用新召回并写回目标用户楼层。
-2. 本轮无新召回时，从当前生成对应用户楼层读取持久召回作为回退。
-3. 两者都没有时，清空注入。
+1. 新 user 回合或用户显式重新召回时，运行 Recall Agent，并把结果同时写入账本 Artifact 和目标用户楼层。
+2. reroll / swipe / regenerate 先验证父 user 回合的耐久 Recall / Planner Artifact，再复用该楼层的持久注入文本；手工编辑过的注入文本也只有在 Artifact 仍合法时才能复用。
+3. Artifact 缺失、失效或聊天已切换时 fail-closed：清空本轮注入，不从消息缓存重跑召回，也不把缓存当作耐久产物。

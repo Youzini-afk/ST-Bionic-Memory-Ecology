@@ -30,6 +30,41 @@ export function memoryLedgerHeadFingerprint(head) {
   return head ? hashDomainValue(stableStringify(head)) : "empty";
 }
 
+export function isMemoryLedgerMetaKey(key = "") {
+  const normalized = String(key || "");
+  return normalized === MEMORY_LEDGER_HEAD_META_KEY ||
+    normalized.startsWith(MEMORY_LEDGER_RECORD_META_PREFIX);
+}
+
+export function encodeMemoryLedgerSnapshotMeta(ledger) {
+  assertMemoryLedger(ledger);
+  if (Number(ledger.revision) === 0) return {};
+  const commits = ledger.records.filter(
+    (record) => record.kind === MEMORY_RECORD_KIND.COMMIT,
+  );
+  const headCommit = commits.at(-1) || null;
+  if (!headCommit || Number(headCommit.revision) !== Number(ledger.revision)) {
+    throw new MemoryLedgerStorageCorruptionError(
+      "memory ledger cannot be encoded without its head commit",
+      { chatId: ledger.chatId, revision: ledger.revision },
+    );
+  }
+  const meta = {};
+  for (const record of ledger.records) {
+    meta[memoryLedgerRecordMetaKey(record.id)] = cloneDomainValue(record, record);
+  }
+  meta[MEMORY_LEDGER_HEAD_META_KEY] = {
+    version: MEMORY_LEDGER_VERSION,
+    chatId: ledger.chatId,
+    revision: ledger.revision,
+    headCommitId: headCommit.id,
+    createdAt: ledger.createdAt,
+    updatedAt: ledger.updatedAt,
+    recordCount: ledger.records.length,
+  };
+  return meta;
+}
+
 export function encodeMemoryLedgerCommitPatch(previousLedger, commitResult) {
   assertMemoryLedger(previousLedger);
   const nextLedger = commitResult?.ledger;
@@ -76,7 +111,18 @@ export function decodeMemoryLedgerSnapshot(snapshot = {}, { chatId } = {}) {
   if (!normalizedChatId) throw new TypeError("memory ledger snapshot requires chatId");
   const meta = snapshot?.meta && typeof snapshot.meta === "object" ? snapshot.meta : {};
   const head = meta[MEMORY_LEDGER_HEAD_META_KEY] || null;
-  if (!head) return freezeDomainValue(createEmptyMemoryLedger({ chatId: normalizedChatId }));
+  if (!head) {
+    const orphanRecordKeys = Object.keys(meta).filter((key) =>
+      key.startsWith(MEMORY_LEDGER_RECORD_META_PREFIX),
+    );
+    if (orphanRecordKeys.length > 0) {
+      throw new MemoryLedgerStorageDivergenceError(
+        "memory ledger records exist without a head",
+        { orphanRecordKeys },
+      );
+    }
+    return freezeDomainValue(createEmptyMemoryLedger({ chatId: normalizedChatId }));
+  }
   if (Number(head.version) !== MEMORY_LEDGER_VERSION || head.chatId !== normalizedChatId) {
     throw new MemoryLedgerStorageCorruptionError("memory ledger head identity mismatch", {
       expectedChatId: normalizedChatId,

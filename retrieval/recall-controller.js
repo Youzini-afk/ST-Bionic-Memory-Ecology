@@ -556,6 +556,41 @@ export async function runRecallController(runtime, options = {}) {
   recallInput.deliveryMode =
     String(options.deliveryMode || "immediate").trim() || "immediate";
 
+  const effectiveGenerationType = String(
+    options.generationType || recallInput.generationType || "normal",
+  ).trim();
+  let boundUserIndex = Number.isFinite(recallInput.targetUserMessageIndex)
+    ? Math.floor(Number(recallInput.targetUserMessageIndex))
+    : null;
+  const normalizeInput = (value = "") =>
+    runtime.normalizeRecallInputText?.(value) ?? String(value || "").trim();
+  if (!Number.isFinite(boundUserIndex)) {
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+      if (
+        chat[index]?.is_user &&
+        normalizeInput(chat[index]?.mes || "") === normalizeInput(userMessage)
+      ) {
+        boundUserIndex = index;
+        break;
+      }
+    }
+  }
+  const inferredNoNewUser = Boolean(
+    !recallInput.authoritativeInputUsed &&
+      Number.isFinite(boundUserIndex) &&
+      chat.slice(boundUserIndex + 1).some(
+        (message) => message && !message.is_user && !message.is_system,
+      ),
+  );
+  if (isNoNewUserGenerationType(effectiveGenerationType) || inferredNoNewUser) {
+    return runtime.createRecallRunResult("skipped", {
+      chatId: recallChatId,
+      reason: "durable-turn-artifact-unavailable",
+      artifactUnavailable: true,
+      generationType: effectiveGenerationType,
+    });
+  }
+
   const cachedRecallPayload =
     options.cachedRecallPayload && typeof options.cachedRecallPayload === "object"
       ? options.cachedRecallPayload
@@ -747,6 +782,8 @@ export async function runRecallController(runtime, options = {}) {
 
       const result = await runtime.retrieve({
         graph: runtime.getCurrentGraph(),
+        chatId: recallChatId,
+        recallInput,
         userMessage,
         recentMessages,
         embeddingConfig: runtime.getEmbeddingConfig(),

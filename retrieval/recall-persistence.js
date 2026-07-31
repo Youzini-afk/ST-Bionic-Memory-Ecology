@@ -4,7 +4,7 @@ import { resolveGenerationParentUserFloor } from "../runtime/conversation-sessio
 import { stableHashString } from "../runtime/runtime-state.js";
 
 export const BME_RECALL_EXTRA_KEY = "bme_recall";
-export const BME_RECALL_VERSION = 3;
+export const BME_RECALL_VERSION = 4;
 
 export const BME_RECALL_STATUS = Object.freeze({
   READY: "ready",
@@ -124,6 +124,31 @@ export function validatePersistedRecallForUserMessage(
   };
 }
 
+export function validatePersistedRecallArtifactBinding(record = null) {
+  const value = cloneRecord(record);
+  if (!value) return { valid: false, reason: "no-record", record: null };
+  const version = Number(value.version || 0);
+  const required = {
+    artifactId: String(value.artifactId || "").trim(),
+    turnId: String(value.turnId || "").trim(),
+    inputFingerprint: String(value.inputFingerprint || "").trim(),
+    artifactHistoryFingerprint: String(
+      value.artifactHistoryFingerprint || "",
+    ).trim(),
+  };
+  if (
+    version !== BME_RECALL_VERSION ||
+    Object.values(required).some((entry) => !entry)
+  ) {
+    return {
+      valid: false,
+      reason: "missing-durable-recall-artifact",
+      record: value,
+    };
+  }
+  return { valid: true, reason: "validated", record: value, ...required };
+}
+
 export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
   if (!Array.isArray(chat) || !Number.isFinite(userMessageIndex)) return null;
   const message = chat[userMessageIndex];
@@ -166,6 +191,7 @@ export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
     authoritativeInputUsed: Boolean(record.authoritativeInputUsed),
     boundUserFloorText: String(record.boundUserFloorText || ""),
     historyFingerprint: String(record.historyFingerprint || ""),
+    artifactHistoryFingerprint: String(record.artifactHistoryFingerprint || ""),
     artifactId: String(record.artifactId || ""),
     turnId: String(record.turnId || ""),
     inputFingerprint: String(record.inputFingerprint || ""),
@@ -218,6 +244,7 @@ export function buildPersistedRecallRecord(payload = {}, existingRecord = null) 
     authoritativeInputUsed: Boolean(payload.authoritativeInputUsed),
     boundUserFloorText: String(payload.boundUserFloorText || ""),
     historyFingerprint: String(payload.historyFingerprint || ""),
+    artifactHistoryFingerprint: String(payload.artifactHistoryFingerprint || ""),
     artifactId: String(payload.artifactId || ""),
     turnId: String(payload.turnId || ""),
     inputFingerprint: String(payload.inputFingerprint || ""),

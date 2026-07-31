@@ -34,7 +34,10 @@ import {
     normalizePlannerWorldbookEntries,
     shouldExcludePlannerWorldbookEntry,
 } from './ena-planner-worldbook-utils.js';
-import { readPlannerPlotHistory } from './planner-plot-history.js';
+import {
+    collectStructuredPlotRecords,
+    formatStructuredPlotRecords,
+} from './planner-plot-history.js';
 import { getActiveTaskProfile } from '../prompting/prompt-profiles.js';
 import {
     resolveDedicatedLlmProviderConfig,
@@ -1272,7 +1275,7 @@ async function buildPlannerMessages(rawUserInput, options = {}) {
 
     const startPlannerRecall = () => {
         if (!_bmeRuntime?.runPlannerRecallForEna) {
-            return Promise.resolve({ memoryBlock: '', memorySource: 'none', plannerRecall: null });
+            return Promise.reject(new Error('BME durable Recall runtime is unavailable'));
         }
         const timeoutController = new AbortController();
         const recallTimeoutMs = getPlannerRecallTimeoutMs();
@@ -1285,11 +1288,16 @@ async function buildPlannerMessages(rawUserInput, options = {}) {
         return _bmeRuntime.runPlannerRecallForEna({
             rawUserInput,
             signal,
-        }).then((recall) => ({
-            memoryBlock: recall?.ok && recall.memoryBlock ? recall.memoryBlock : '',
-            memorySource: recall?.ok && recall.memoryBlock ? 'bme' : 'none',
-            plannerRecall: recall ?? null,
-        })).catch((e) => {
+        }).then((recall) => {
+            if (!recall?.ok) {
+                throw new Error(`BME durable Recall unavailable: ${String(recall?.reason || 'unknown')}`);
+            }
+            return {
+                memoryBlock: recall.memoryBlock || '',
+                memorySource: recall.memoryBlock ? 'bme' : 'empty',
+                plannerRecall: recall,
+            };
+        }).catch((e) => {
             throwIfPlannerAborted(options.signal);
             if (timeoutController.signal.aborted) {
                 console.warn(`[Ena] BME recall timed out (> ${Math.floor(recallTimeoutMs / 1000)}s)`);
@@ -1298,7 +1306,7 @@ async function buildPlannerMessages(rawUserInput, options = {}) {
             } else {
                 console.warn('[Ena] BME planner recall failed:', e);
             }
-            return { memoryBlock: '', memorySource: 'none', plannerRecall: null };
+            throw e;
         }).finally(() => {
             clearTimeout(timeoutId);
             debugLog(
@@ -1318,7 +1326,16 @@ async function buildPlannerMessages(rawUserInput, options = {}) {
     // a little continuity even when memory recall returns empty.
     const recentChatRaw = collectRecentChatSnippet(chat, 2);
 
-    const plotsRaw = readPlannerPlotHistory(chat, { count: s.plotCount }).block;
+    const plotCandidates = collectStructuredPlotRecords(chat, s.plotCount);
+    let durablePlotRecords = [];
+    if (_bmeRuntime?.validatePlannerPlotHistoryRecords) {
+        try {
+            durablePlotRecords = await _bmeRuntime.validatePlannerPlotHistoryRecords(plotCandidates);
+        } catch (error) {
+            console.warn('[Ena] durable Planner history validation failed:', error);
+        }
+    }
+    const plotsRaw = formatStructuredPlotRecords(durablePlotRecords, s.plotCount).block;
 
     // Build scanText for worldbook keyword activation
     const scanText = [charBlockRaw, recentChatRaw, plotsRaw, rawUserInput].join('\n\n');

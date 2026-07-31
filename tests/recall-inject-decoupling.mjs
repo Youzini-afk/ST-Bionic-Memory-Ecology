@@ -7,12 +7,15 @@ import {
 function createRuntime(overrides = {}) {
   const calls = {
     applyFinalRecallInjectionForGeneration: 0,
+    clearFinalRecallInjectionFailClosed: 0,
     buildGenerationAfterCommandsRecallInput: 0,
     buildHistoryGenerationRecallInput: 0,
     buildNormalGenerationRecallInput: 0,
     createGenerationRecallContext: 0,
     reapplyPersistedRecallBlock: 0,
+    reportNoNewUserArtifactUnavailable: 0,
     runRecall: 0,
+    validateNoNewUserTurnArtifacts: 0,
   };
   const runtime = {
     calls,
@@ -33,6 +36,10 @@ function createRuntime(overrides = {}) {
       return { userMessage: "fresh normal" };
     },
     clearLiveRecallInjectionPromptForRewrite: () => {},
+    clearFinalRecallInjectionFailClosed: () => {
+      calls.clearFinalRecallInjectionFailClosed += 1;
+      return { source: "none", applicationMode: "fail-closed", usedText: "" };
+    },
     clearPendingHostGenerationInputSnapshot: () => {},
     clearPendingRecallSendIntent: () => {},
     consumeDryRunPromptPreview: () => false,
@@ -65,6 +72,9 @@ function createRuntime(overrides = {}) {
       calls.reapplyPersistedRecallBlock += 1;
       return { applied: false, reason: "default-miss" };
     },
+    reportNoNewUserArtifactUnavailable: () => {
+      calls.reportNoNewUserArtifactUnavailable += 1;
+    },
     resolveGenerationRecallDeliveryMode: () => "deferred",
     runRecall: async () => {
       calls.runRecall += 1;
@@ -75,6 +85,10 @@ function createRuntime(overrides = {}) {
       };
     },
     storeGenerationRecallTransactionResult: () => {},
+    validateNoNewUserTurnArtifacts: async () => {
+      calls.validateNoNewUserTurnArtifacts += 1;
+      return { valid: true };
+    },
     ...overrides,
   };
   return runtime;
@@ -126,35 +140,18 @@ function createRuntime(overrides = {}) {
 }
 
 {
-  const finalSentinel = { source: "fallback-final", applied: true };
-  const transaction = { id: "tx-fallback" };
+  const finalSentinel = { source: "none", applicationMode: "fail-closed", usedText: "" };
   const runtime = createRuntime({
-    applyFinalRecallInjectionForGeneration: (payload) => {
-      runtime.calls.applyFinalRecallInjectionForGeneration += 1;
-      assert.equal(payload.transaction, transaction);
+    clearFinalRecallInjectionFailClosed: (payload) => {
+      runtime.calls.clearFinalRecallInjectionFailClosed += 1;
+      assert.equal(payload.expectedChatId, "chat-inject-decoupling");
       assert.equal(payload.hookName, "GENERATE_BEFORE_COMBINE_PROMPTS");
       return finalSentinel;
-    },
-    createGenerationRecallContext: () => {
-      runtime.calls.createGenerationRecallContext += 1;
-      return {
-        shouldRun: true,
-        transaction,
-        recallOptions: { userMessage: "fallback user" },
-        generationType: "regenerate",
-        hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
-        recallKey: "recall-key-fallback",
-      };
     },
     getGenerationContext: () => ({ kind: "no-new-user", type: "regenerate" }),
     reapplyPersistedRecallBlock: () => {
       runtime.calls.reapplyPersistedRecallBlock += 1;
       return { applied: false, reason: "no-record" };
-    },
-    runRecall: async (options) => {
-      runtime.calls.runRecall += 1;
-      assert.equal(options.hookName, "GENERATE_BEFORE_COMBINE_PROMPTS");
-      return { status: "completed", didRecall: true, injectionText: "computed" };
     },
   });
 
@@ -162,11 +159,35 @@ function createRuntime(overrides = {}) {
     combinedPrompt: "prompt",
   });
 
-  assert.equal(result, finalSentinel);
+  assert.deepEqual(result, {
+    ...finalSentinel,
+    skipped: true,
+    artifactUnavailable: true,
+    reason: "no-record",
+  });
   assert.equal(runtime.calls.reapplyPersistedRecallBlock, 1);
-  assert.equal(runtime.calls.createGenerationRecallContext, 1);
-  assert.equal(runtime.calls.runRecall, 1);
-  assert.equal(runtime.calls.applyFinalRecallInjectionForGeneration, 1);
+  assert.equal(runtime.calls.createGenerationRecallContext, 0);
+  assert.equal(runtime.calls.runRecall, 0);
+  assert.equal(runtime.calls.applyFinalRecallInjectionForGeneration, 0);
+  assert.equal(runtime.calls.clearFinalRecallInjectionFailClosed, 1);
+  assert.equal(runtime.calls.reportNoNewUserArtifactUnavailable, 1);
+}
+
+{
+  const runtime = createRuntime({
+    getGenerationContext: () => ({ kind: "no-new-user", type: "swipe" }),
+    validateNoNewUserTurnArtifacts: async () => {
+      runtime.calls.validateNoNewUserTurnArtifacts += 1;
+      return { valid: false, reason: "durable-planner-artifact-unavailable" };
+    },
+  });
+  const result = await onBeforeCombinePromptsController(runtime, {});
+  assert.equal(result.artifactUnavailable, true);
+  assert.equal(result.reason, "durable-planner-artifact-unavailable");
+  assert.equal(runtime.calls.reapplyPersistedRecallBlock, 0);
+  assert.equal(runtime.calls.runRecall, 0);
+  assert.equal(runtime.calls.reportNoNewUserArtifactUnavailable, 1);
+  assert.equal(runtime.calls.clearFinalRecallInjectionFailClosed, 1);
 }
 
 {

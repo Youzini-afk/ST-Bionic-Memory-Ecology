@@ -4,6 +4,8 @@ ST-BME 的图谱数据可能存在多种位置，取决于宿主环境和服务�
 
 ## 存储分层
 
+领域主源不是图谱快照，而是每张聊天记录自己的 append-only memory ledger。下表描述 ledger 与其可重建图谱投影所在的物理层：
+
 | 层 | 用途 | 说明 |
 | --- | --- | --- |
 | **Authority SQL** | 规范主源 | 有 st-doa/Authority 时的权威存储；唯一有可靠图谱版本 |
@@ -18,13 +20,15 @@ ST-BME 的图谱数据可能存在多种位置，取决于宿主环境和服务�
 
 **关键设计：** Luker 宿主下，浏览器全图镜像默认关闭（`cacheStorageTier = none`），避免把大图谱重复写进 IndexedDB/OPFS。只有用户显式"重建本地缓存"才写浏览器缓存。
 
-### 单一耐久主源与回合提交
+### 单一耐久主源与账本提交
 
 每次写入只选择一个耐久主源：Authority SQL、Luker chat-state、OPFS 或 IndexedDB。选定后，另一个存储层不能在主写失败时偷偷变成“已接受”的兜底；例如 Luker 主写失败时，本地缓存不能冒充成功，Authority 已接管后也不能回退到浏览器或 Luker。`metadata-full` 和 shadow 只能保存恢复材料。
 
-一次提取回合把图谱增量、`extractionCount`、processed floor/hash、batch journal 和向量 dirty 状态放进同一份待提交快照。底层的原子边界分别由 Authority SQL transaction、IndexedDB transaction、OPFS WAL→manifest 提交或 Luker sidecar journal→manifest 提供。只有主源返回 `accepted` 后，这份完整快照才会替换当前会话中的运行图谱；失败或排队时，运行图谱和楼层指针都不前移。
+一次领域提交把 evidence、disposition、memory/relation revision、Inbox/Agent event、Recall/Planner Artifact 与 commit 组成合法账本前缀。每条不可变 record 存在快照 `meta` 的独立嵌套键中，小型 head 指向最新 commit；物理 store CAS 与 ledger parent commit 都必须匹配。只有提交成功后才重建并发布图谱投影，失败时不会前移任一语义指针。
 
 chat metadata 中的 commit marker 是主写成功后的恢复锚点，不属于底层事务本身，也不能代替主源的成功结果。异步 marker、pending retry 和副本任务都绑定发起时的聊天目标；切换聊天后可以继续完成原目标的耐久写，但不能把结果发布到新聊天。
+
+Luker 使用独立的 `st_bme_memory_ledger_v1` chat-state namespace 与 revision updater。目标在任务开始时冻结；缺少 target、adapter 或 CAS 时直接失败，绝不把浏览器缓存冒充成功。
 
 ### Cloud Sync 副本协议
 
@@ -32,13 +36,15 @@ Cloud Sync 不参与上述主提交确认，只复制 IndexedDB / OPFS 本地主
 
 旧 head 不再引用的 publication 专属 chunk 会进入 head 内的 GC 账本，默认保留 24 小时。新 publication 永不复用旧 publication 的文件名，因此“复核 head 后、实际 delete 前”的竞争发布也不会重新引用被删文件。账本不截断；到期条目在后续上传或无变化的自动同步检查中删除，失败条目继续保留，成功/404 条目随下一次 head 成功发布退休。旧版没有 publication 隔离证据的 chunk 条目只保留、不由浏览器自动删除。chunk 已写而 head 发布失败时，失败路径会按已知文件名和实际写入后端尽力补偿；未能补偿的已知 chunk 会按聊天、head 文件名、publication 和后端记入浏览器本地主存储，后续成功发布先把它们并入远端 GC 账本，再按同一宽限和复核规则回收；这份本地恢复账本不会复制进图谱快照。
 
-复制任务不能反向破坏本地主源。上传完成后的 revision 确认与 dirty 更新必须在本地主存储的同一事务/串行写锁内完成：若上传期间本地已前进，只确认实际上传的旧 revision，并继续保持 `syncDirty`。自动下载与 merge 在替换本地快照时使用同一事务/写锁内的 expected-revision 门禁；门禁失配说明本地刚有新提交，本次远端应用必须放弃。merge 从落本地的一刻起到远端发布成功前始终保持 dirty；发布失败或发布期间出现新本地提交，都不能把合并结果误标成已同步。
+复制任务不能反向破坏本地主源。上传完成后的 revision 确认与 dirty 更新必须在本地主存储的同一事务/串行写锁内完成：若上传期间本地已前进，只确认实际上传的旧 revision，并继续保持 `syncDirty`。自动下载与 merge 在替换本地快照时使用同一事务/写锁内的 expected-revision 门禁；门禁失配说明本地刚有新提交，本次远端应用必须放弃。远端声明的 chatId 必须与当前聊天一致，不能先覆写身份再合并。
+
+账本 metadata 不走普通“新字段覆盖旧字段”逻辑。若一端是另一端祖先，直接选择后代；真正分叉时按确定顺序重放兼容事务并重建一条合法 commit 链；同 ID 不同内容、同一 Agent run 的互斥事件链等无法证明安全的分歧会 fail closed。merge 从落本地的一刻起到远端发布成功前始终保持 dirty；发布失败或发布期间出现新本地提交，都不能把合并结果误标成已同步。
 
 SillyTavern user-files 没有 list、条件写入或条件删除，因此未知历史孤儿不可安全枚举，跨设备竞争只能通过宽限期和操作前后的 head 校验收窄；远端语义是乐观的 last-writer-wins，不是线性事务。本设备能恢复的是自己持久登记的已知失败文件，不是任意远端孤儿。浏览器端删除只使用当前/旧稳定 head、其显式 chunk/GC 引用及本地已知失败账本作为证据，绝不按前缀推测删除。
 
-## 快照契约
+## 图谱容器契约
 
-耐久快照的顶层结构被**冻结**为固定的六个键（实现见 `sync/graph-snapshot-schema.js`）：
+为兼容现有 IndexedDB/OPFS/Cloud 协议，承载账本与图谱投影的物理快照顶层仍**冻结**为六个键（实现见 `sync/graph-snapshot-schema.js`）。ledger record/head 位于 `meta` 内，不新增第七个顶层键：
 
 ```
 {
@@ -84,9 +90,9 @@ SillyTavern user-files 没有 list、条件写入或条件删除，因此未知�
 
 当前快照布局版本是第一版，升级链为空，但框架和铁律已立住——以后改格式只是"加一个升级步骤"，不是搬家。
 
-### 关于 Luker sidecar
+### 关于 Luker chat-state
 
-Luker checkpoint 存的是完整序列化图谱（`serializeGraph`），节点/边的未知字段被保留——所以图谱正文通过 Luker 是容错的。sidecar 上的信封元数据（manifest 统计、checkpoint 元信息）用白名单规范化是**有意为之**：那些是可重算的运行指标，不是图谱本身，丢了能重建。
+Luker 的 ledger namespace 保存与其它 store 同构的不可变账本；兼容图谱仍可作为可重建视图保存在既有 checkpoint。节点/边未知字段会保留，sidecar 上可重算的统计/信封字段仍可用白名单规范化。
 
 ## 图谱内容版本 vs 快照布局版本
 

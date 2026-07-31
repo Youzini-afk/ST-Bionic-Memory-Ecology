@@ -10,7 +10,7 @@
 ### usage/ — 使用手册
 面向用户："怎么配、怎么用、出问题怎么查"。它们展开根 README 中的产品概览。中英双语（`.md` 中文 / `.en.md` English）。
 
-- [`configuration.md`](usage/configuration.md) · [EN](usage/configuration.en.md) — 完整配置参考：记忆 LLM、Embedding、提取/召回/认知/维护设置、任务预设、ENA、隐藏/渲染、Native
+- [`configuration.md`](usage/configuration.md) · [EN](usage/configuration.en.md) — 完整配置参考：BME Agent 模型、Embedding、Agent 运行、召回/认知、任务预设、ENA、隐藏/渲染、Native
 - [`panel.md`](usage/panel.md) · [EN](usage/panel.en.md) — 面板导览：总览、任务、操作、配置、图谱区域
 - [`troubleshooting.md`](usage/troubleshooting.md) · [EN](usage/troubleshooting.en.md) — 排障指南
 - [`storage-and-sync.md`](usage/storage-and-sync.md) · [EN](usage/storage-and-sync.en.md) — 数据存储、云端镜像、兼容兜底、持久召回卡片
@@ -18,6 +18,7 @@
 ### architecture/ — 架构与控制平面
 跨文件的结构、数据路径、不变量。这些内容变化慢，是理解"为什么这样组织"的入口。
 
+- [`agent-memory-vnext.md`](architecture/agent-memory-vnext.md) — 当前 Agent 记忆内核契约：聊天账本、Steward、Recall/Planner Artifact、并发与生产切换
 - [`overview.md`](architecture/overview.md) — 子系统地图 + 写入/读取/安全三条数据路径 + 完整目录结构 + 事件挂载
 - [`control-plane.md`](architecture/control-plane.md) — 身份解析、持久化状态机、必须维持的不变量
 - [`storage-and-formats.md`](architecture/storage-and-formats.md) — 存储分层、快照契约、向前兼容纪律
@@ -26,10 +27,10 @@
 ### algorithms/ — 算法原理
 核心算法"怎么算的"：参数、公式、阈值。基于真实代码编写，并标注关键文件位置。
 
-- [`retrieval.md`](algorithms/retrieval.md) — 三层混合检索：向量预筛 + 图扩散 + LLM 精排 + 多意图/DPP/残差
-- [`extraction.md`](algorithms/extraction.md) — LLM 提取管线：消息 → 结构化 → 图谱写入 → 时序边
+- [`retrieval.md`](algorithms/retrieval.md) — Recall Agent 的程序化候选包：向量预筛 + 图扩散 + 多意图/DPP/残差 + 深查工具
+- [`extraction.md`](algorithms/extraction.md) — Memory Steward 的证据读取、记忆修订、依赖校验与原子发布
 - [`diffusion-and-dynamics.md`](algorithms/diffusion-and-dynamics.md) — 图扩散（PEDSA）+ 混合评分 + 访问强化/衰减
-- [`consolidation-and-compression.md`](algorithms/consolidation-and-compression.md) — 记忆整合/去重 + 压缩遗忘 + 分层总结
+- [`consolidation-and-compression.md`](algorithms/consolidation-and-compression.md) — Steward 如何按语境自主整合、进化、总结与归档
 - [`vector-and-embedding.md`](algorithms/vector-and-embedding.md) — 向量空间身份 + 批量 embedding + 维度门禁
 
 ### features/ — 功能解析
@@ -37,7 +38,7 @@
 
 - [`memory-model.md`](features/memory-model.md) — 节点类型、关系类型、主客观分层、故事时间线
 - [`recall-cards.md`](features/recall-cards.md) — 持久召回卡片
-- [`history-safety.md`](features/history-safety.md) — 历史变动恢复、渲染限制保护、Restore Lock
+- [`history-safety.md`](features/history-safety.md) — 证据版本、删改/swipe/reroll、分支与渲染限制保护
 - [`hide-and-render.md`](features/hide-and-render.md) — 隐藏旧楼层与渲染限制
 - [`ena-planner.md`](features/ena-planner.md) — ENA Planner
 - [`native-acceleration.md`](features/native-acceleration.md) — Native/WASM 灰度加速

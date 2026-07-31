@@ -28,54 +28,54 @@ Quick links: [Configuration](docs/usage/configuration.en.md) · [Panel guide](do
 
 ## Core capabilities
 
-- **Automatic memory extraction** — After each AI reply, ST-BME extracts structured nodes and relations from the conversation (characters, events, locations, rules, plot threads, reflections, subjective memories), using a default two-stage objective + subjective/POV commit pipeline and excluding reasoning tags like `think`/`analysis`/`reasoning`.
-- **Multi-layer hybrid recall** — Before generation, relevant memories are recalled through vector prefilter, graph diffusion, lexical boosting, multi-intent splitting, DPP diversity sampling, and optional LLM reranking; per-message persistent recall cards are supported.
+- **Background Memory Steward** — An AI reply becomes immutable evidence and durable work. An Agent decides whether to extract, reconcile, correct, summarize, or make no change, and every write crosses a per-chat transaction boundary.
+- **Multi-layer Agent recall** — Programmatic vector, graph, lexical, temporal, and unindexed-tail candidates provide a fast starting point. The Recall Agent can search deeper for the current situation, then persists one turn Artifact and recall card.
 - **Cognitive architecture** — Character POV / user POV / objective world memory, spatial region weighting, and a story timeline.
-- **Summarization & maintenance** — Small summaries, summary rollup, reflection, consolidation, automatic compression, active forgetting — all logged and reversible.
+- **Autonomous evolution and maintenance** — Deduplication, conflict evolution, summaries, relation repair, and forgetting are tools the Memory Steward uses when the evidence calls for them, not mandatory serial stages on a fixed cadence.
 - **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
-- **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
-- **ENA Planner integration** — Explicitly enabled, default-off pre-send story planning for fresh user turns, sharing BME recall and the `planner` task profile.
+- **Task preset system** — BME Agents and ENA use the model configured inside BME; task profiles still provide prompt, regex, world-info, and EJS extension points.
+- **ENA Planner integration** — Explicitly enabled, default-off pre-send planning for fresh user turns, sharing the exact BME Recall Artifact and the `planner` task profile.
 - **Persistence & sync** — Memory is isolated by chat record, not character card. Standard ST selects OPFS / IndexedDB automatically, with Luker chat-state and Authority SQL support plus Cloud Sync for browser-local storage, independent backup/restore, rebuild, and repair.
-- **History safety** — Detects message deletion / edits / swipes / rerolls and recovers from the change point. A reroll rolls back the old assistant effects while reusing the parent user turn's persisted recall without rerunning ENA; truncated "render only the last N" views are protected.
+- **History safety** — Delete, edit, swipe, and reroll invalidate or reactivate evidence versions, allowing dependent memories to resolve to their last valid revision. Reroll reuses the parent user turn's Recall and Planner Artifacts without rerunning either Agent.
 - **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.
 
 ---
 
 ## How it works
 
-ST-BME can be understood as three pipelines: **write** (conversation → memory), **read** (memory → injection), and **safety** (history change → recovery).
+ST-BME can be understood as three paths: **write** (conversation → memory), **read** (memory → injection), and **safety** (history change → recovery).
 
 ```mermaid
 flowchart LR
     subgraph Write["Write: conversation → memory"]
-        A["AI reply"] --> B["Structured message preprocessing"]
-        B --> C["LLM objective extraction + subjective/POV extraction"]
-        C --> D["Nearest-neighbor reconciliation + cognitive scoping"]
-        D --> E["Write graph + vector sync + timeline"]
-        E --> F["Consolidate / compress / summarize / reflect"]
+        A["AI reply"] --> B["Immutable turn evidence + durable work"]
+        B --> C["Memory Steward queries current memory"]
+        C --> D["Extract / reconcile / evolve as needed"]
+        D --> E["Transactional ledger commit"]
+        E --> F["Views + background vector sync"]
     end
 
     subgraph Read["Read: memory → injection"]
-        G["User about to generate"] --> H["Multi-intent + context-blended query"]
-        H --> I["Vector prefilter + graph diffusion + lexical boost"]
-        I --> J["Cognitive boundary filter + hybrid scoring"]
-        J --> K["Optional LLM rerank + bucketed injection"]
+        G["User about to generate"] --> H["Programmatic multi-channel candidates"]
+        H --> I["Recall Agent searches deeper as needed"]
+        I --> J["Cognitive boundaries + selection"]
+        J --> K["Durable Recall Artifact + injection"]
     end
 
     subgraph Safe["Safety: history change → recovery"]
-        L["Delete / edit / swipe"] --> M["Message hash detection"]
-        M --> N["Locate affected turns"]
-        N --> O["Roll back batches and vectors"]
-        O --> P["Re-extract from the change point"]
+        L["Delete / edit / swipe"] --> M["Rebuild conversation evidence snapshot"]
+        M --> N["Invalidate / activate evidence versions"]
+        N --> O["Resolve the last valid memory revisions"]
+        O --> P["Background Steward repair"]
     end
 
     F -.-> G
     P -.-> E
 ```
 
-- **Write**: the conversation is normalized into structured messages (reasoning tags excluded by default) → the LLM emits structured graph operations → nodes are written, vectors synced, timeline updated → post-processing (consolidation, compression, summary, reflection, forgetting).
-- **Read**: resolve the recall target → vector prefilter + graph diffusion + lexical boost → rank and filter by fusing multiple signals → bucketed injection into the prompt, optionally writing a persistent recall card.
-- **Safety**: a hash is recorded for each processed message; when a history change is detected, ST-BME prefers rollback-and-replay from the maintenance log, falling back to a full rebuild only when a safe rollback is not possible.
+- **Write**: conversation turns first become immutable evidence and durable work. The Memory Steward reads context and the ledger, then publishes memory revisions through tools; the graph is a rebuildable projection.
+- **Read**: fast candidates cover common paths, while the Recall Agent can keep querying indexes. Its final selection and injection are saved as a turn Artifact; an empty result is also persisted.
+- **Safety**: history changes append evidence dispositions that propagate to dependent revisions. A late task can only write to its frozen origin chat and cannot publish into another chat's UI.
 
 > Algorithm details (formulas, parameters, thresholds) are in [`docs/algorithms/`](docs/algorithms/); architecture and data paths are in [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
@@ -110,12 +110,12 @@ Then restart or refresh SillyTavern.
 
 1. **Open the panel** — Click "Memory Graph" in the top-left menu.
 2. **Enable the plugin** — Config → Feature toggles, confirm the main switch is on.
-3. **Configure the model** — Leave the memory LLM blank to reuse the current chat model; or fill in an independent OpenAI-compatible URL/key/model under "API config".
+3. **Configure the model** — Fill in BME's dedicated URL, key, and model under "API config". The Memory Steward, Recall Agent, and ENA share this BME-owned model; they never borrow the current chat model or DOA's Agent model.
 4. **Configure embedding** — The direct Embedding API is the default and can connect to an independent external embedding service. You can also switch to the SillyTavern backend index, which is limited to vector sources supported by the host. Direct connections require browser CORS access.
-5. **Start chatting** — Just chat normally. Extraction runs after each AI reply, and recall runs before the next generation.
+5. **Start chatting** — Just chat normally. The Memory Steward updates the ledger in the background after an AI reply; the Recall Agent runs before the next generation without waiting for background work.
 6. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
 
-> Minimum viable setup: enable the plugin and ensure the current chat model works. Recall quality drops noticeably when embedding is unavailable, so configure it early.
+> Minimum viable setup: enable the plugin and configure BME's dedicated model. Deterministic and unindexed-tail candidates still work without embedding, but an external embedding service improves coverage.
 >
 > See [Configuration](docs/usage/configuration.en.md) for full settings and [Panel guide](docs/usage/panel.en.md) for what each panel area does.
 
@@ -148,8 +148,8 @@ Then restart or refresh SillyTavern.
 
 - **One primary per chat**: every chat record binds its own durable primary, so multiple chats opened from one character card never share memory. Standard SillyTavern selects OPFS / IndexedDB; Luker uses chat-state; Authority SQL becomes canonical when available.
 - **Multi-device replication and backups**: Cloud Sync only replicates browser-local OPFS / IndexedDB. Authority SQL is already shared across devices and does not get a second Cloud Sync layer. Manual server backups are separate from the automatic mirror.
-- **History safety**: detects delete/edit/swipe, prefers rollback-and-replay, falls back to full rebuild when needed; protects against render-truncated views to avoid wrongly clearing the graph.
-- **Forward compatibility**: durable snapshots have a frozen top-level shape, tolerant parsing, and upgrade-on-read — extending the data structure means "add a field", not a big migration.
+- **History safety**: delete, edit, and swipe append evidence invalidation/activation records and automatically project the remaining valid memory revisions. Render-truncated views are guarded from being mistaken for complete history.
+- **One migration, one authority**: old graphs are imported into the per-chat ledger in one atomic transaction. From then on the graph, timeline, and vector index are rebuildable projections rather than a second write authority.
 
 > See [Storage & sync](docs/usage/storage-and-sync.en.md), [History safety](docs/features/history-safety.md), and [Data formats & forward compatibility](docs/architecture/storage-and-formats.md).
 
@@ -157,7 +157,7 @@ Then restart or refresh SillyTavern.
 
 ## Having trouble?
 
-Step-by-step troubleshooting for common situations (panel won't open, no auto-extraction, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.en.md).
+Step-by-step troubleshooting for common situations (panel won't open, background work produces no memory, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.en.md).
 
 ---
 
@@ -167,7 +167,7 @@ Step-by-step troubleshooting for common situations (panel won't open, no auto-ex
 - **Embedding sets the recall floor** — without high-quality vectors, recall leans more on lexical and graph structure.
 - **Direct mode may be affected by CORS** — browser security policy may block requests.
 - **Very long chats still have a cost** — hiding/render limits/summary rollup reduce pressure but can't eliminate all overhead.
-- **History recovery prioritizes correctness** — it falls back to a full rebuild when the log is insufficient, which can be slow.
+- **History repair prioritizes correctness** — conflicting or damaged state stops the commit and asks for repair instead of guessing over the ledger.
 - **Third-party themes may affect recall card mounting** — cards may skip mounting if a theme removes the standard message DOM or turn-index attributes.
 - **Native acceleration is a rollout capability** — it fails open to JS by default and can be force-disabled in the panel.
 

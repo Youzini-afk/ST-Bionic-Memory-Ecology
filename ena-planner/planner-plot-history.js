@@ -24,6 +24,15 @@ export function createStructuredPlotRecord({
     plotBlocks = null,
     promptProfileId = '',
     recallHandoffId = '',
+    recallArtifactId = '',
+    recallChatId = '',
+    recallTurnId = '',
+    recallInputFingerprint = '',
+    recallHistoryFingerprint = '',
+    recallMemoryStateFingerprint = '',
+    recallSelectedMemoryIds = [],
+    recallCandidateMemoryIds = [],
+    plannerArtifactId = '',
     taskResults = [],
     createdAt = Date.now(),
     inputHash = '',
@@ -43,6 +52,19 @@ export function createStructuredPlotRecord({
         plotBlocks: blocks,
         promptProfileId: String(promptProfileId || ''),
         recallHandoffId: String(recallHandoffId || ''),
+        recallArtifactId: String(recallArtifactId || ''),
+        recallChatId: String(recallChatId || ''),
+        recallTurnId: String(recallTurnId || ''),
+        recallInputFingerprint: String(recallInputFingerprint || ''),
+        recallHistoryFingerprint: String(recallHistoryFingerprint || ''),
+        recallMemoryStateFingerprint: String(recallMemoryStateFingerprint || ''),
+        recallSelectedMemoryIds: Array.isArray(recallSelectedMemoryIds)
+            ? recallSelectedMemoryIds.map((item) => String(item || '')).filter(Boolean)
+            : [],
+        recallCandidateMemoryIds: Array.isArray(recallCandidateMemoryIds)
+            ? recallCandidateMemoryIds.map((item) => String(item || '')).filter(Boolean)
+            : [],
+        plannerArtifactId: String(plannerArtifactId || ''),
         taskResults: Array.isArray(taskResults) ? taskResults : [],
         createdAt: Number.isFinite(Number(createdAt)) ? Number(createdAt) : Date.now(),
     };
@@ -94,6 +116,16 @@ export function recoverStructuredPlotRecordFromPlannerRecall(message, recallReco
         plannerAugmentedMessage: augmentedMessage,
         plannerRecallInjectionText: String(recallRecord?.injectionText || '').trim(),
         plotText,
+        recallArtifactId: String(recallRecord?.artifactId || ''),
+        recallChatId: String(recallRecord?.chatId || ''),
+        recallTurnId: String(recallRecord?.turnId || ''),
+        recallInputFingerprint: String(recallRecord?.inputFingerprint || ''),
+        recallHistoryFingerprint: String(
+            recallRecord?.artifactHistoryFingerprint || recallRecord?.historyFingerprint || '',
+        ),
+        recallMemoryStateFingerprint: String(recallRecord?.memoryStateFingerprint || ''),
+        recallSelectedMemoryIds: recallRecord?.selectedNodeIds || [],
+        recallCandidateMemoryIds: recallRecord?.candidateNodeIds || [],
         createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
     });
 }
@@ -105,11 +137,48 @@ export function collectStructuredPlotRecords(chat, count = 2) {
     const records = [];
     for (let index = chat.length - 1; index >= 0; index--) {
         const record = readStructuredPlotRecordFromMessage(chat[index]);
-        if (!record) continue;
+        if (
+            !record?.recallArtifactId
+            || !record?.plannerArtifactId
+            || !record?.recallChatId
+            || !record?.recallTurnId
+            || !record?.recallInputFingerprint
+            || !record?.recallHistoryFingerprint
+            || !record?.recallMemoryStateFingerprint
+        ) continue;
         records.push(record);
         if (records.length >= want) break;
     }
     return records;
+}
+
+export function formatStructuredPlotRecords(records, count = 2) {
+    const want = Math.max(0, Number(count) || 0);
+    if (!want || !Array.isArray(records)) {
+        return { source: 'empty', records: [], plots: [], block: '' };
+    }
+    const normalizedRecords = records
+        .map((record) => normalizeStructuredPlotRecord(record))
+        .filter(Boolean)
+        .slice(0, want);
+    const seen = new Set();
+    const plots = [];
+    for (const record of normalizedRecords) {
+        const recordBlocks = record.plotBlocks.length > 0
+            ? record.plotBlocks
+            : extractLastNPlots([{ mes: record.plotText || '' }], want);
+        const plot = recordBlocks.join('\n').trim();
+        if (!plot || seen.has(plot)) continue;
+        plots.push(plot);
+        seen.add(plot);
+        if (plots.length >= want) break;
+    }
+    return {
+        source: plots.length > 0 ? 'structured' : 'empty',
+        records: normalizedRecords,
+        plots,
+        block: formatPlotsBlock(plots),
+    };
 }
 
 export function readPlannerPlotHistory(chat, { count = 2 } = {}) {
@@ -117,42 +186,10 @@ export function readPlannerPlotHistory(chat, { count = 2 } = {}) {
     if (!want) {
         return { source: 'empty', records: [], plots: [], block: '' };
     }
-    const structuredRecords = collectStructuredPlotRecords(chat, count);
-    const seen = new Set();
-    const plots = [];
-    let usedLegacy = false;
-    if (structuredRecords.length > 0) {
-        for (const record of structuredRecords) {
-            const recordBlocks = record.plotBlocks.length > 0
-                ? record.plotBlocks
-                : extractLastNPlots([{ mes: record.plotText || '' }], want);
-            const plot = recordBlocks.join('\n').trim();
-            if (!plot || seen.has(plot)) continue;
-            plots.push(plot);
-            seen.add(plot);
-            if (plots.length >= want) break;
-        }
-    }
-
-    if (plots.length < want) {
-        for (const legacyPlot of extractLastNPlots(chat, want)) {
-            if (!legacyPlot || seen.has(legacyPlot)) continue;
-            plots.push(legacyPlot);
-            seen.add(legacyPlot);
-            usedLegacy = true;
-            if (plots.length >= want) break;
-        }
-    }
-
-    const source = structuredRecords.length > 0
-        ? (usedLegacy ? 'structured+legacy' : 'structured')
-        : (plots.length > 0 ? 'legacy' : 'empty');
-    return {
-        source,
-        records: structuredRecords,
-        plots,
-        block: formatPlotsBlock(plots),
-    };
+    return formatStructuredPlotRecords(
+        collectStructuredPlotRecords(chat, count),
+        want,
+    );
 }
 
 export function writeStructuredPlotRecordToMessage(message, recordInput) {

@@ -358,6 +358,17 @@ export function createRerollRecallInput(deps = {}) {
         normalizeRecallInputText(userMessageText) ===
           normalizeRecallInputText(handoff.plannerAugmentedMessage),
     );
+    // Once a handoff has been bound to a concrete generation, a different
+    // active generation can never claim it merely by sending identical text.
+    // Text matching remains the MESSAGE_SENT fallback only after the host has
+    // already cleared its generation window (or before a generation id exists).
+    if (
+      matchedGenerationId &&
+      activeGenerationId &&
+      !matchesGeneration
+    ) {
+      return null;
+    }
     if (!matchesGeneration && !matchesUserMessage) return null;
     plannerTurnHandoffs.delete(normalizedChatId);
     return handoff;
@@ -411,6 +422,20 @@ export function createRerollRecallInput(deps = {}) {
           plotBlocks: Array.isArray(plannerPlotRecord?.plotBlocks)
             ? [...plannerPlotRecord.plotBlocks]
             : null,
+          recallArtifactId: String(result?.artifactId || ""),
+          recallChatId: String(result?.chatId || normalizedChatId),
+          recallTurnId: String(result?.turnId || ""),
+          recallInputFingerprint: String(result?.inputFingerprint || ""),
+          recallHistoryFingerprint: String(result?.historyFingerprint || ""),
+          recallMemoryStateFingerprint: String(result?.memoryStateFingerprint || ""),
+          recallSelectedMemoryIds: Array.isArray(result?.selectedMemoryIds)
+            ? [...result.selectedMemoryIds]
+            : Array.isArray(result?.selectedNodeIds)
+              ? [...result.selectedNodeIds]
+              : [],
+          recallCandidateMemoryIds: Array.isArray(result?.candidateMemoryIds)
+            ? [...result.candidateMemoryIds]
+            : [],
         }
       : null;
     if (!result && !normalizedPlotRecord) return null;
@@ -496,6 +521,11 @@ export function createRerollRecallInput(deps = {}) {
                 chat,
                 newUserMessageIndex,
               ) || "",
+            artifactHistoryFingerprint: String(result?.historyFingerprint || ""),
+            artifactId: String(result?.artifactId || ""),
+            turnId: String(result?.turnId || ""),
+            inputFingerprint: String(result?.inputFingerprint || ""),
+            memoryStateFingerprint: String(result?.memoryStateFingerprint || ""),
           }),
         ),
       );

@@ -791,6 +791,9 @@ export async function onBeforeCombinePromptsController(
     {};
   const context = runtime.getContext();
   const chat = context?.chat;
+  const originChatId = String(
+    runtime.getCurrentChatId?.() || context?.chatId || "",
+  ).trim();
   const generationContext = runtime.getGenerationContext?.() || null;
   const effectiveGenerationType =
     generationContext?.type ||
@@ -805,6 +808,27 @@ export async function onBeforeCombinePromptsController(
   }
 
   if (effectiveGenerationKind === "no-new-user") {
+    const artifactValidation = await runtime.validateNoNewUserTurnArtifacts?.({
+      generationType: effectiveGenerationType,
+      generationContext,
+    });
+    if (!artifactValidation?.valid) {
+      const reason =
+        artifactValidation?.reason || "durable-turn-artifacts-unavailable";
+      runtime.reportNoNewUserArtifactUnavailable?.(reason);
+      const cleared = runtime.clearFinalRecallInjectionFailClosed?.({
+        expectedChatId: originChatId,
+        promptData,
+        reason,
+        hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+      }) || { source: "none", applicationMode: "fail-closed", usedText: "" };
+      return {
+        ...(cleared || {}),
+        skipped: true,
+        artifactUnavailable: true,
+        reason,
+      };
+    }
     const reapplied = runtime.reapplyPersistedRecallBlock?.({
       generationType: effectiveGenerationType,
       generationContext,
@@ -814,68 +838,20 @@ export async function onBeforeCombinePromptsController(
     if (reapplied?.applied) {
       return reapplied;
     }
-
-    const recallOptions =
-      runtime.buildGenerationAfterCommandsRecallInput(
-        effectiveGenerationType,
-        { generationContext },
-        chat,
-      ) || {};
-    const recallContext = runtime.createGenerationRecallContext({
-      hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
-      generationType: effectiveGenerationType,
-      recallOptions,
-    });
-    if (!recallContext.shouldRun && !recallContext.transaction) {
-      return;
-    }
-    const runtimeRecallOptions =
-      recallContext.recallOptions || recallOptions || {};
-    const deliveryMode =
-      runtime.resolveGenerationRecallDeliveryMode?.(
-        recallContext.hookName,
-        recallContext.generationType,
-        runtimeRecallOptions,
-      ) || "deferred";
-    let recallResult = runtime.getGenerationRecallTransactionResult?.(
-      recallContext.transaction,
-    );
-    if (recallContext.shouldRun) {
-      runtime.markGenerationRecallTransactionHookState(
-        recallContext.transaction,
-        recallContext.hookName,
-        "running",
-      );
-      if (deliveryMode === "deferred") {
-        runtime.clearLiveRecallInjectionPromptForRewrite?.();
-      }
-      recallResult = await runtime.runRecall({
-        ...runtimeRecallOptions,
-        deliveryMode,
-        recallKey: recallContext.recallKey,
-        hookName: recallContext.hookName,
-      });
-      runtime.storeGenerationRecallTransactionResult?.(
-        recallContext.transaction,
-        recallResult,
-        {
-          hookName: recallContext.hookName,
-          deliveryMode,
-        },
-      );
-      runtime.markGenerationRecallTransactionHookState(
-        recallContext.transaction,
-        recallContext.hookName,
-        runtime.getGenerationRecallHookStateFromResult(recallResult),
-      );
-    }
-    return runtime.applyFinalRecallInjectionForGeneration({
-      generationType: recallContext.generationType,
-      freshRecallResult: recallResult,
-      transaction: recallContext.transaction,
+    const reason = reapplied?.reason || "persisted-recall-reapply-failed";
+    runtime.reportNoNewUserArtifactUnavailable?.(reason);
+    const cleared = runtime.clearFinalRecallInjectionFailClosed?.({
+      expectedChatId: originChatId,
       promptData,
-      hookName: recallContext.hookName,
-    });
+      reason,
+      hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+    }) || { source: "none", applicationMode: "fail-closed", usedText: "" };
+    return {
+      ...(cleared || {}),
+      skipped: true,
+      artifactUnavailable: true,
+      reason,
+    };
   }
   const normalInput = runtime.buildNormalGenerationRecallInput(chat, {
     frozenInputSnapshot,

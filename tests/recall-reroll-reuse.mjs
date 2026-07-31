@@ -433,7 +433,7 @@ assert.equal(
 console.log("  ✓ before-combine reuses existing history transaction");
 
 // ═══════════════════════════════════════════════════════════════
-// 3. runRecallController: regenerate reuses persisted record
+// 3. runRecallController: no-new-user never bypasses durable artifacts
 // ═══════════════════════════════════════════════════════════════
 
 // Set up a fresh chat with a properly persisted recall record
@@ -566,11 +566,11 @@ const rerollResult = await runRecallController(rerollRuntime, {
   deliveryMode: "immediate",
 });
 
-assert.equal(rerollResult.status, "completed", "reroll should complete");
+assert.equal(rerollResult.status, "skipped", "unverified reroll must fail closed");
 assert.equal(
   rerollResult.reason,
-  "persisted-user-floor-reused",
-  "reroll should reuse persisted record, not run fresh recall",
+  "durable-turn-artifact-unavailable",
+  "the lower controller must not treat a message cache as a durable artifact",
 );
 assert.equal(
   retrieveCalled,
@@ -593,12 +593,12 @@ assert.equal(
   "persisted reroll reuse should not enter visible fresh recall state",
 );
 assert.equal(
-  rerollResult.injectionText,
-  "注入:明日去摩耶山看夜景",
-  "injection text should come from persisted record",
+  String(rerollResult.injectionText || ""),
+  "",
+  "unverified message cache must not be injected",
 );
 
-console.log("  ✓ runRecallController reuses persisted record on regenerate");
+console.log("  ✓ runRecallController rejects unverified message cache on regenerate");
 
 const mutatedPrefixChat = [
   { is_user: true, mes: "earlier user" },
@@ -640,10 +640,11 @@ const mutatedPrefixResult = await runRecallController(mutatedPrefixRuntime, {
   hookName: "GENERATION_AFTER_COMMANDS",
   deliveryMode: "immediate",
 });
-assert.equal(mutatedPrefixRetrieveCalled, true);
-assert.equal(mutatedPrefixResult.reason, "召回完成");
+assert.equal(mutatedPrefixRetrieveCalled, false);
+assert.equal(mutatedPrefixResult.status, "skipped");
+assert.equal(mutatedPrefixResult.reason, "durable-turn-artifact-unavailable");
 
-console.log("  ✓ reroll refreshes recall after an earlier history floor changes");
+console.log("  ✓ reroll does not recompute after an earlier history floor changes");
 
 const normalTypedReuseChat = [
   { is_user: true, mes: "重 Roll 但宿主仍标 normal" },
@@ -685,8 +686,8 @@ const normalTypedReuseResult = await runRecallController(normalTypedReuseRuntime
 
 assert.equal(
   normalTypedReuseResult.reason,
-  "persisted-user-floor-reused",
-  "normal-typed reroll should still reuse target user-floor recall",
+  "durable-turn-artifact-unavailable",
+  "an assistant tail reveals a no-new-user run even when the host reports normal",
 );
 assert.equal(
   normalTypedRetrieveCalled,
@@ -694,7 +695,7 @@ assert.equal(
   "normal-typed reroll should not call retrieve when target user floor has recall",
 );
 
-console.log("  ✓ runRecallController reuses persisted record when host reports reroll as normal");
+console.log("  ✓ runRecallController rejects message-cache fallback when host reports reroll as normal");
 
 const rerollInputHarness = await createGenerationRecallHarness({ realApplyFinal: true });
 Object.assign(rerollInputHarness.settings, {
@@ -791,13 +792,13 @@ const legacyUnboundResult = await runRecallController(legacyUnboundRuntime, {
 
 assert.equal(
   legacyUnboundResult.reason,
-  "召回完成",
-  "legacy unbound record with mismatched recallInput should not be reused",
+  "durable-turn-artifact-unavailable",
+  "legacy unbound no-new-user records must stop at the durable boundary",
 );
 assert.equal(
   legacyUnboundRetrieveCalled,
-  true,
-  "legacy unbound record with mismatched recallInput should call retrieve",
+  false,
+  "legacy unbound no-new-user records must not call retrieve",
 );
 
 console.log("  ✓ runRecallController rejects legacy unbound recallInput mismatch");
@@ -835,6 +836,7 @@ const activeInputResult = await runRecallController(activeInputRuntime, {
   generationType: "normal",
   targetUserMessageIndex: 0,
   overrideSource: "send-intent",
+  authoritativeInputUsed: true,
   hookName: "GENERATION_AFTER_COMMANDS",
   deliveryMode: "immediate",
 });
@@ -887,6 +889,7 @@ const activeInputBoundResult = await runRecallController(activeInputBoundRuntime
   generationType: "normal",
   targetUserMessageIndex: 0,
   overrideSource: "send-intent",
+  authoritativeInputUsed: true,
   hookName: "GENERATION_AFTER_COMMANDS",
   deliveryMode: "immediate",
 });
@@ -949,13 +952,13 @@ const mismatchedBoundResult = await runRecallController(mismatchedBoundRuntime, 
 
 assert.equal(
   mismatchedBoundRetrieveCalled,
-  true,
-  "bound user-floor mismatch should force a fresh recall",
+  false,
+  "bound user-floor mismatch on no-new-user must not force a fresh recall",
 );
 assert.equal(
-  mismatchedBoundResult.injectionText,
-  "新召回:已经编辑过的新楼层",
-  "bound user-floor mismatch should not reuse stale persisted recall",
+  mismatchedBoundResult.reason,
+  "durable-turn-artifact-unavailable",
+  "bound user-floor mismatch must expose the durable artifact boundary",
 );
 
 console.log("  ✓ runRecallController does not reuse record when bound user floor mismatches");
@@ -1019,22 +1022,22 @@ const noReuseResult = await runRecallController(noReuseRuntime, {
   deliveryMode: "immediate",
 });
 
-assert.equal(noReuseResult.status, "completed", "no-reuse should complete");
+assert.equal(noReuseResult.status, "skipped", "unbound reroll must stop explicitly");
 assert.equal(
   noReuseRetrieveCalled,
-  true,
-  "legacy records without a history fingerprint must refresh once",
+  false,
+  "legacy records without a durable binding must never trigger reroll recall",
 );
 assert.equal(
   noReuseResult.reason,
-  "召回完成",
-  "unverifiable legacy records must not bypass fresh recall",
+  "durable-turn-artifact-unavailable",
+  "unverifiable records must expose the missing artifact boundary",
 );
 
-console.log("  ✓ runRecallController refreshes legacy records without a history fingerprint");
+console.log("  ✓ runRecallController rejects legacy reroll records without durable binding");
 
 // ═══════════════════════════════════════════════════════════════
-// 5. runRecallController: normal generation below an assistant reuses user-floor record
+// 5. normal generation below an assistant is inferred as no-new-user
 // ═══════════════════════════════════════════════════════════════
 
 const assistantTailChat = [
@@ -1094,15 +1097,15 @@ const assistantTailResult = await runRecallController(assistantTailRuntime, {
   deliveryMode: "immediate",
 });
 
-assert.equal(assistantTailResult.status, "completed");
+assert.equal(assistantTailResult.status, "skipped");
 assert.equal(
   assistantTailRetrieveCalled,
   false,
-  "normal generation below an assistant should find and reuse the matching user-floor persisted recall",
+  "assistant-tail no-new-user inference must not run fresh recall",
 );
-assert.equal(assistantTailResult.reason, "persisted-user-floor-reused");
+assert.equal(assistantTailResult.reason, "durable-turn-artifact-unavailable");
 
-console.log("  ✓ runRecallController reuses user-floor record below assistant tail");
+console.log("  ✓ runRecallController infers no-new-user below assistant tail");
 
 let releaseLateRecall;
 let notifyLateRecallStarted;

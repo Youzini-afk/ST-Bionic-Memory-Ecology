@@ -265,6 +265,7 @@ export async function createGenerationRecallHarness(options = {}) {
     hideScheduleCalls: [],
     metadataSaveCalls: 0,
     recallUiRefreshCalls: 0,
+    artifactUnavailableReports: [],
     retrieveCalls: [],
     retrieveImpl: null,
     isExtracting: false,
@@ -668,6 +669,8 @@ export async function createGenerationRecallHarness(options = {}) {
     clearPendingRecallSendIntent: (...args) =>
       recallInputState.clearPendingRecallSendIntent(...args),
     clearLiveRecallInjectionPromptForRewrite,
+    clearFinalRecallInjectionFailClosed: (...args) =>
+      finalRecallInjectionRuntime.clearFinalRecallInjectionFailClosed(...args),
     clearCurrentGenerationTrivialSkip: (...args) =>
       recallInputState.clearCurrentGenerationTrivialSkip(...args),
     consumeDryRunPromptPreview,
@@ -705,6 +708,13 @@ export async function createGenerationRecallHarness(options = {}) {
     normalizeRecallInputText,
     reapplyPersistedRecallBlock: (...args) =>
       finalRecallInjectionRuntime.reapplyPersistedRecallBlock(...args),
+    validateNoNewUserTurnArtifacts: (...args) =>
+      typeof harness.validateNoNewUserTurnArtifacts === "function"
+        ? harness.validateNoNewUserTurnArtifacts(...args)
+        : { valid: false, reason: "durable-turn-artifacts-unavailable" },
+    reportNoNewUserArtifactUnavailable: (reason) => {
+      harness.artifactUnavailableReports.push(String(reason || ""));
+    },
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     resolveGenerationRecallDeliveryMode: (...args) =>
       generationRecallTransactionRuntime.resolveGenerationRecallDeliveryMode(...args),

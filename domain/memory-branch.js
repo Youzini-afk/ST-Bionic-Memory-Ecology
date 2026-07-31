@@ -1,9 +1,10 @@
 import { MEMORY_RECORD_KIND, createEmptyMemoryLedger } from "./memory-contract.js";
-import { createDomainId } from "./memory-id.js";
+import { createDomainId, hashDomainValue } from "./memory-id.js";
 import { appendMemoryLedgerTransaction, buildMemoryLedgerIndex } from "./memory-ledger.js";
 import { materializeMemoryLedger } from "./memory-materializer.js";
 import {
   createMemoryRevision,
+  createMigrationRecord,
   createRelationRevision,
   createTurnEvidence,
 } from "./memory-records.js";
@@ -173,17 +174,29 @@ export function forkMemoryLedger(
     }
   }
 
-  if (records.length === 0) {
-    return {
-      ledger: targetLedger,
-      commit: null,
-      appendedRecords: [],
-      transaction: null,
-      branchId: normalizedBranchId,
-      evidenceIdMap,
-      revisionIdMap,
-    };
-  }
+  records.push(
+    createMigrationRecord({
+      chatId: normalizedTargetChatId,
+      migrationId: "legacy-graph-to-ledger",
+      sourceKind: "vnext-ledger-branch",
+      sourceVersion: String(sourceLedger.version || ""),
+      converterVersion: "branch-v1",
+      sourceFingerprint: hashDomainValue({
+        sourceChatId: sourceLedger.chatId,
+        sourceRevision: sourceLedger.revision,
+        branchId: normalizedBranchId,
+        cutoffFloor,
+        recordIds: records.map((record) => record.id),
+      }),
+      importedRecordIds: records.map((record) => record.id),
+      metadata: {
+        branchId: normalizedBranchId,
+        branchSourceChatId: sourceLedger.chatId,
+        branchSourceRevision: sourceLedger.revision,
+      },
+      createdAt: now,
+    }),
+  );
   const transaction = {
     baseRevision: 0,
     idempotencyKey: `branch-import:${normalizedBranchId}`,

@@ -17,6 +17,12 @@ import {
 } from "./host/st-extensions.js";
 
 import { ConversationRepository } from "./sync/conversation-repository.js";
+import { createBmeMemoryLifecycleRuntime } from "./application/memory-lifecycle-runtime.js";
+import { createMemoryStewardRuntime } from "./application/memory-steward-runtime.js";
+import { createRecallAgentRuntime } from "./application/recall-agent-runtime.js";
+import { buildConversationEvidenceSnapshot } from "./host/conversation-snapshot.js";
+import { MemoryLedgerStoreRouter } from "./host/memory-ledger-store-router.js";
+import { sanitizePlannerMessageText } from "./runtime/planner-tag-utils.js";
 import {
   BmeDatabase,
   buildBmeDbName,
@@ -105,7 +111,6 @@ import {
   onMessageDeletedController,
   onMessageEditedController,
   onMessageUpdatedController,
-  onMessageReceivedController,
   onMessageSentController,
   onMessageSwipedController,
   onUserMessageRenderedController,
@@ -190,7 +195,6 @@ import { createConversationWorkspace } from "./runtime/conversation-workspace.js
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
 import { createAutoExtractionDefer } from "./runtime/auto-extraction-defer.js";
-import { runPlannerRecallForEnaController } from "./runtime/planner-recall-controller.js";
 import { extractMemories } from "./maintenance/extractor.js";
 import {
   generateSmallSummary,
@@ -320,6 +324,8 @@ import {
   removePersistedRecallFromUserMessage,
   resolveFinalRecallInjectionSource,
   resolveGenerationTargetUserMessageIndex,
+  validatePersistedRecallArtifactBinding,
+  validatePersistedRecallForUserMessage,
   writePersistedRecallToUserMessage,
 } from "./retrieval/recall-persistence.js";
 import { resolveConfiguredTimeoutMs } from "./runtime/request-timeout.js";
@@ -422,15 +428,6 @@ import {
   onFetchEmbeddingModelsController,
   onFetchMemoryLLMModelsController,
   onImportGraphController,
-  onManualCompressController,
-  onManualEvolveController,
-  onManualSummaryRollupController,
-  onManualSleepController,
-  onManualSynopsisController,
-  onRebuildSummaryStateController,
-  onClearSummaryStateController,
-  onUndoLastMaintenanceController,
-  onRebuildController,
   onRebuildVectorIndexController,
   onReembedDirectController,
   onTestEmbeddingController,
@@ -1980,6 +1977,10 @@ const stageAbortControllers = {
 };
 let conversationRepository = null;
 let conversationRepositoryUnavailableWarned = false;
+let bmeMemoryStoreRouter = null;
+let bmeMemoryLifecycle = null;
+const bmeMemoryLifecycleJobsByChatId = new Map();
+const plannerArtifactPublicationJobs = new Map();
 let bmeLocalStoreCapabilityPromise = null;
 let bmeLocalStoreCapabilitySnapshot = {
   checked: false,
@@ -5746,6 +5747,9 @@ function applyFinalRecallInjectionForGeneration({
     hookName,
   });
 }
+function clearFinalRecallInjectionFailClosed(options = {}) {
+  return finalRecallInjectionRuntime.clearFinalRecallInjectionFailClosed(options);
+}
 function reapplyPersistedRecallBlock(args = {}) {
   return finalRecallInjectionRuntime.reapplyPersistedRecallBlock(args);
 }
@@ -7471,6 +7475,219 @@ function ensureConversationRepository() {
     });
   }
   return conversationRepository;
+}
+
+function resolveBmeMemoryHostBinding(chatId, context = getContext()) {
+  if (!isLukerPrimaryPersistenceHost(context)) {
+    return { hostProfile: "generic-st", chatId };
+  }
+  return {
+    hostProfile: BME_HOST_PROFILE_LUKER,
+    chatId,
+    target: resolveCurrentChatStateTarget(context),
+    hostAdapter: getBmeHostAdapter(context),
+  };
+}
+
+function isBmeMemoryEventForCurrentChat(chatId) {
+  const activeIdentity = resolveCurrentChatIdentity(getContext());
+  const activeChatId = resolvePersistenceChatId(getContext(), conversationWorkspace.graph);
+  return areChatIdsEquivalentForResolvedIdentity(chatId, activeChatId, activeIdentity);
+}
+
+function applyBmeMemoryProjection(event = {}) {
+  if (!event?.graph || !isBmeMemoryEventForCurrentChat(event.chatId)) return;
+  conversationWorkspace.graph = event.graph;
+  updateGraphPersistenceState({
+    memoryLedgerRevision: Number(event.view?.revision || event.graph?.memoryProjection?.ledgerRevision || 0),
+    memoryLedgerStateFingerprint: String(event.stateFingerprint || ""),
+    memoryLedgerProjectionUpdatedAt: Date.now(),
+  });
+  refreshPanelLiveState();
+  scheduleBmeIndexedDbTask(async () => {
+    if (!isBmeMemoryEventForCurrentChat(event.chatId)) return;
+    await saveGraphToChat({
+      reason: `memory-ledger-projection:${event.reason || event.source || "update"}`,
+    });
+    if ((event.changedNodeIds || []).length || (event.deletedNodeIds || []).length) {
+      scheduleBackgroundVectorSync(
+        {
+          chatId: event.chatId,
+          reason: "memory-ledger-projection",
+        },
+        getSettings(),
+      );
+    }
+  });
+}
+
+function applyMemoryStewardStatus(status = {}) {
+  if (!isBmeMemoryEventForCurrentChat(status.chatId)) return;
+  const state = String(status.status || "idle");
+  const previous = conversationWorkspace.graphPersistenceState.memorySteward || {};
+  const next = {
+    ...previous,
+    state,
+    runId: String(status.runId || previous.runId || ""),
+    inboxCount: Number(status.inboxCount || 0),
+    outcome: String(status.outcome || ""),
+    error: String(status.error || ""),
+    updatedAt: Date.now(),
+  };
+  updateGraphPersistenceState({ memorySteward: next });
+  refreshPanelLiveState();
+}
+
+function applyRecallAgentStatus(status = {}) {
+  if (!isBmeMemoryEventForCurrentChat(status.chatId)) return;
+  if (status.status === "running") {
+    setLastRecallStatus("Agent 召回中", "正在从当前记忆账本选择本轮上下文", "running", {
+      syncRuntime: false,
+    });
+  } else if (status.status === "completed") {
+    setLastRecallStatus(
+      status.empty ? "召回完成 · 本轮无匹配" : "Agent 召回完成",
+      status.fallback ? "已使用确定性候选结果" : "召回结果已持久化",
+      status.agentError ? "warning" : "success",
+      { syncRuntime: false },
+    );
+  }
+}
+
+function ensureBmeMemoryLifecycle() {
+  if (bmeMemoryLifecycle) return bmeMemoryLifecycle;
+  const localRepository = ensureConversationRepository();
+  if (!localRepository) return null;
+  bmeMemoryStoreRouter = new MemoryLedgerStoreRouter({
+    localConversationRepository: localRepository,
+    resolveHostBinding: async (chatId) => resolveBmeMemoryHostBinding(chatId),
+  });
+  bmeMemoryLifecycle = createBmeMemoryLifecycleRuntime({
+    conversationRepository: bmeMemoryStoreRouter,
+    settingsProvider: () => getSettings(),
+    stewardRuntimeFactory: createMemoryStewardRuntime,
+    recallRuntimeFactory: createRecallAgentRuntime,
+    onProjection: applyBmeMemoryProjection,
+    onStewardStatus: applyMemoryStewardStatus,
+    onRecallStatus: applyRecallAgentStatus,
+  });
+  return bmeMemoryLifecycle;
+}
+
+function captureBmeMemoryConversation() {
+  // Create the router before resolving the host target so the captured
+  // chat/target pair can be registered atomically. Without this ordering, a
+  // first-run task could switch chats before getStoreForChat resolved Luker's
+  // mutable current target.
+  if (!ensureBmeMemoryLifecycle() || !bmeMemoryStoreRouter) return null;
+  const context = getContext();
+  const identity = resolveCurrentChatIdentity(context);
+  const chatId = resolvePersistenceChatId(context, conversationWorkspace.graph);
+  if (!chatId || !identity?.hasLikelySelectedChat || !Array.isArray(context?.chat)) return null;
+  const resolvedIdentity = { ...identity, chatId };
+  const conversationSnapshot = buildConversationEvidenceSnapshot(context.chat, {
+    chatId,
+    hostChatId: identity.hostChatId,
+    sanitizeMessage: (message) => sanitizePlannerMessageText(message),
+  });
+  const binding = resolveBmeMemoryHostBinding(chatId, context);
+  // Freeze both generic and Luker profiles. A generic capture must not be
+  // rerouted into a newly-current Luker chat either.
+  bmeMemoryStoreRouter.registerHostBinding(chatId, binding);
+  return {
+    chatId,
+    identity: resolvedIdentity,
+    conversationSnapshot,
+    graph: conversationWorkspace.graph,
+    legacySourceReady:
+      isGraphReadable(conversationWorkspace.graphPersistenceState.loadState) ||
+      conversationWorkspace.graph?.memoryProjection?.authority === "vnext-ledger",
+    lease: conversationWorkspace.captureLease(),
+  };
+}
+
+async function runBmeMemoryLifecycleSnapshot(
+  captured,
+  { reason = "history-reconciled", wakeSteward = true } = {},
+) {
+  const lifecycle = ensureBmeMemoryLifecycle();
+  if (!lifecycle || !captured) return null;
+  const result = await lifecycle.initialize({
+    identity: captured.identity,
+    conversationSnapshot: captured.conversationSnapshot,
+    legacyGraph: captured.graph || {},
+    legacySourceReady: captured.legacySourceReady === true,
+    previousGraph: captured.graph,
+    reason,
+    mutationId: `${reason}:${captured.conversationSnapshot.historyFingerprint}`,
+  });
+  if (isBmeMemoryEventForCurrentChat(captured.chatId)) {
+    schedulePendingPlannerArtifactPublications(getContext());
+  }
+  if (wakeSteward) {
+    void lifecycle.wakeSteward(captured.chatId, {
+      previousGraph: result.projection.graph,
+      reason,
+    }).catch((error) => {
+      console.warn("[ST-BME] Memory Steward 后台任务失败:", error);
+      applyMemoryStewardStatus({
+        chatId: captured.chatId,
+        status: "deferred",
+        error: error?.message || String(error),
+      });
+    });
+  }
+  return result;
+}
+
+function scheduleBmeMemoryLifecycle(reason = "history-reconciled", options = {}) {
+  if (getSettings().enabled !== true) return null;
+  ensureBmeMemoryLifecycle();
+  const captured = captureBmeMemoryConversation();
+  if (!captured) return null;
+  let job = bmeMemoryLifecycleJobsByChatId.get(captured.chatId);
+  if (job) {
+    job.latest = captured;
+    job.reason = reason;
+    job.wakeSteward = options.wakeSteward !== false;
+    job.rerun = true;
+    return job.promise;
+  }
+  job = {
+    latest: captured,
+    reason,
+    wakeSteward: options.wakeSteward !== false,
+    rerun: false,
+    promise: null,
+  };
+  job.promise = Promise.resolve()
+    .then(async () => {
+      let result = null;
+      do {
+        job.rerun = false;
+        result = await runBmeMemoryLifecycleSnapshot(job.latest, {
+          reason: job.reason,
+          wakeSteward: job.wakeSteward,
+        });
+      } while (job.rerun);
+      return result;
+    })
+    .catch((error) => {
+      console.error("[ST-BME] 记忆账本生命周期失败:", error);
+      applyMemoryStewardStatus({
+        chatId: captured.chatId,
+        status: "deferred",
+        error: error?.message || String(error),
+      });
+      return null;
+    })
+    .finally(() => {
+      if (bmeMemoryLifecycleJobsByChatId.get(captured.chatId) === job) {
+        bmeMemoryLifecycleJobsByChatId.delete(captured.chatId);
+      }
+    });
+  bmeMemoryLifecycleJobsByChatId.set(captured.chatId, job);
+  return job.promise;
 }
 
 function recordLocalPersistEarlyFailure(
@@ -9718,11 +9935,64 @@ async function onChatBranchCreated(payload = {}) {
     return missing;
   }
 
-  const branchGraph = deriveBranchGraphFromSourceGraph(sourceGraph, {
+  let branchGraph = deriveBranchGraphFromSourceGraph(sourceGraph, {
     targetChatId,
     cutoffFloor,
     assistantMessageCount,
   });
+  let ledgerBranchResult = null;
+  try {
+    const lifecycle = ensureBmeMemoryLifecycle();
+    const sourceLedgerChatId = normalizeChatIdCandidate(
+      sourceGraph?.memoryProjection?.chatId ||
+        sourceGraph?.historyState?.chatId ||
+        resolvePersistenceChatId(context, sourceGraph),
+    );
+    const hostAdapter = getBmeHostAdapter(context);
+    bmeMemoryStoreRouter?.registerHostBinding(sourceLedgerChatId, {
+      hostProfile: BME_HOST_PROFILE_LUKER,
+      hostAdapter,
+      target: sourceTarget,
+    });
+    bmeMemoryStoreRouter?.registerHostBinding(targetChatId, {
+      hostProfile: BME_HOST_PROFILE_LUKER,
+      hostAdapter,
+      target: targetTarget,
+    });
+    const sourceSnapshot = buildConversationEvidenceSnapshot(context?.chat || [], {
+      chatId: sourceLedgerChatId,
+      hostChatId: resolveChatStateTargetChatId(sourceTarget),
+      sanitizeMessage: (message) => sanitizePlannerMessageText(message),
+    });
+    await lifecycle?.initialize({
+      identity: { ...resolveCurrentChatIdentity(context), chatId: sourceLedgerChatId },
+      conversationSnapshot: sourceSnapshot,
+      legacyGraph: sourceGraph,
+      legacySourceReady: true,
+      previousGraph: sourceGraph,
+      reason: "chat-branch-source",
+    });
+    ledgerBranchResult = await lifecycle?.fork(
+      { chatId: sourceLedgerChatId, hostChatId: resolveChatStateTargetChatId(sourceTarget) },
+      { chatId: targetChatId, hostChatId: resolveChatStateTargetChatId(targetTarget) },
+      { cutoffFloor, branchId: String(payload?.branchId || "") },
+    );
+    const targetProjection = await lifecycle?.project(targetChatId, branchGraph, {
+      reason: "chat-branch-created",
+      source: "branch",
+    });
+    if (targetProjection?.graph) branchGraph = targetProjection.graph;
+  } catch (error) {
+    const failed = {
+      ok: false,
+      reason: "memory-ledger-branch-failed",
+      error: error?.message || String(error),
+      targetChatId,
+      cutoffFloor,
+    };
+    updateGraphPersistenceState({ lastBranchInheritResult: failed });
+    return failed;
+  }
   const branchRevision = Math.max(
     1,
     Number(getGraphPersistedRevision(sourceGraph) || 0) + 1,
@@ -9782,6 +10052,7 @@ async function onChatBranchCreated(payload = {}) {
     sourceTarget: cloneRuntimeDebugValue(sourceTarget, null),
     targetTarget: cloneRuntimeDebugValue(targetTarget, null),
     revision: Number(persistResult?.revision || branchRevision || 0),
+    memoryLedgerRevision: Number(ledgerBranchResult?.ledger?.revision || 0),
   };
   updateGraphPersistenceState({
     lastBranchInheritResult: result,
@@ -15433,60 +15704,9 @@ async function tryDeleteBackendVectorHashesForRecovery(
 }
 
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
-  return await recoverHistoryIfNeededController(
-    {
-      applyRecoveryPlanToVectorState,
-      assertRecoveryHistoryStillCurrent,
-      beginStageAbortController,
-      buildChatHistoryFingerprint,
-      buildRecoveryResult,
-      buildReverseJournalRecoveryPlan,
-      clampRecoveryStartFloor,
-      clearHistoryDirty,
-      clearInjectionState,
-      cloneGraphSnapshot,
-      console,
-      createEmptyGraph,
-      ensureCurrentGraphRuntimeState,
-      enterRestoreLock,
-      findJournalRecoveryPoint,
-      finishStageAbortController,
-      getContext,
-      getCurrentChatId,
-      getCurrentGraph: () => conversationWorkspace.graph,
-      getEmbeddingConfig,
-      getExtractionCount: () => conversationWorkspace.extractionCount,
-      getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
-      getRenderLimitedHistoryRecoveryGuard,
-      getSettings,
-      inspectHistoryMutation,
-      isAbortError,
-      isBackendVectorConfig,
-      isRestoreLockActive,
-      leaveRestoreLock,
-      markHistoryDirty,
-      maybeResumePendingAutoExtraction,
-      normalizeGraphRuntimeState,
-      notifyRenderLimitedHistoryRecoveryBlocked,
-      persistDetachedRecoveryGraph,
-      prepareVectorStateForReplay,
-      queueMicrotask: globalThis.queueMicrotask?.bind?.(globalThis),
-      refreshPanelLiveState,
-      replayExtractionFromHistory,
-      rollbackAffectedJournals,
-      saveGraphToChat,
-      setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
-      setExtractionCount: (count) => { conversationWorkspace.extractionCount = count; },
-      setIsRecoveringHistory: (value) => { conversationWorkspace.isRecoveringHistory = value; },
-      settleExtractionStatusAfterHistoryRecovery,
-      throwIfAborted,
-      toastr,
-      tryDeleteBackendVectorHashesForRecovery,
-      updateProcessedHistorySnapshot,
-      updateStageNotice,
-    },
-    { trigger },
-  );
+  return await prepareBmeMemoryLedgerForRecall(trigger, {
+    wakeSteward: false,
+  });
 }
 function settleExtractionStatusAfterHistoryRecovery(
   text = "提取完成",
@@ -15523,35 +15743,7 @@ async function runExtraction() {
     !Array.isArray(arguments[0])
       ? arguments[0]
       : {};
-  return await runExtractionController({
-    beginStageAbortController,
-    clampInt,
-    console,
-    deferAutoExtraction,
-    ensureCurrentGraphRuntimeState,
-    ensureGraphMutationReady,
-    executeExtractionBatch,
-    finishStageAbortController,
-    getAssistantTurns,
-    getContext,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
-    getGraphMutationBlockReason,
-    getIsExtracting: () => conversationWorkspace.isExtracting,
-    getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
-    getLastProcessedAssistantFloor,
-    getSettings,
-    getSmartTriggerDecision,
-    isAbortError,
-    notifyExtractionIssue,
-    recoverHistoryIfNeeded,
-    resolveAutoExtractionPlan,
-    retryPendingGraphPersist,
-    setIsExtracting: (value) => {
-      conversationWorkspace.isExtracting = value;
-    },
-    setLastExtractionStatus,
-  }, options);
+  return await requestMemoryStewardAction("extract", options);
 }
 
 function applyRecallInjection(settings, recallInput, recentMessages, result) {
@@ -15687,42 +15879,247 @@ function buildRecallRetrieveOptions(settings, context) {
   };
 }
 
+async function prepareBmeMemoryLedgerForRecall(
+  reason = "pre-recall",
+  { wakeSteward = false } = {},
+) {
+  const captured = captureBmeMemoryConversation();
+  if (!captured || !ensureBmeMemoryLifecycle()) return false;
+  const result = await runBmeMemoryLifecycleSnapshot(captured, {
+    reason,
+    wakeSteward,
+  });
+  return Boolean(
+    result &&
+      conversationWorkspace.isLeaseCurrent(captured.lease, {
+        requireGeneration: false,
+      }),
+  );
+}
+
+async function validateNoNewUserTurnArtifacts({
+  generationType = "regenerate",
+  generationContext = null,
+} = {}) {
+  const context = getContext();
+  const chat = context?.chat;
+  const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+    generationType,
+    generationContext,
+  });
+  if (!Number.isFinite(targetUserMessageIndex)) {
+    return { valid: false, reason: "no-parent-user-turn" };
+  }
+  const validation = validatePersistedRecallForUserMessage(
+    chat,
+    targetUserMessageIndex,
+    readPersistedRecallFromUserMessage(chat, targetUserMessageIndex),
+  );
+  if (!validation.valid) {
+    return {
+      valid: false,
+      reason: validation.reason || "recall-record-invalid",
+      targetUserMessageIndex,
+    };
+  }
+  const artifactBinding = validatePersistedRecallArtifactBinding(
+    validation.record,
+  );
+  if (!artifactBinding.valid) {
+    return {
+      valid: false,
+      reason: artifactBinding.reason,
+      targetUserMessageIndex,
+    };
+  }
+  if (!(await prepareBmeMemoryLedgerForRecall("pre-reroll-artifact-validation"))) {
+    return {
+      valid: false,
+      reason: "memory-ledger-not-ready",
+      targetUserMessageIndex,
+    };
+  }
+  const lifecycle = ensureBmeMemoryLifecycle();
+  const chatId = resolvePersistenceChatId(context, conversationWorkspace.graph);
+  const record = validation.record;
+  const recallArtifact = await lifecycle.reuseRecall({
+    chatId,
+    turnId: record.turnId,
+    inputFingerprint: record.inputFingerprint,
+    historyFingerprint: record.artifactHistoryFingerprint,
+  });
+  if (!recallArtifact || recallArtifact.artifactId !== record.artifactId) {
+    return {
+      valid: false,
+      reason: "durable-recall-artifact-unavailable",
+      targetUserMessageIndex,
+    };
+  }
+
+  let plot = readStructuredPlotRecordFromMessage(chat[targetUserMessageIndex]);
+  if (!plot?.plotText) {
+    return {
+      valid: true,
+      targetUserMessageIndex,
+      recallArtifact,
+      plannerArtifact: null,
+    };
+  }
+  if (!plot.plannerArtifactId) {
+    await schedulePlannerArtifactPublication(targetUserMessageIndex);
+    plot = readStructuredPlotRecordFromMessage(chat[targetUserMessageIndex]);
+  }
+  if (
+    String(plot.recallArtifactId || "") !== String(record.artifactId || "") ||
+    String(plot.recallTurnId || "") !== String(record.turnId || "") ||
+    String(plot.recallInputFingerprint || "") !==
+      String(record.inputFingerprint || "") ||
+    String(plot.recallHistoryFingerprint || "") !==
+      String(record.artifactHistoryFingerprint || "")
+  ) {
+    return {
+      valid: false,
+      reason: "planner-recall-artifact-mismatch",
+      targetUserMessageIndex,
+    };
+  }
+  const plannerArtifact = await lifecycle.reusePlanner({
+    chatId,
+    turnId: plot.recallTurnId,
+    inputFingerprint: plot.recallInputFingerprint,
+    historyFingerprint: plot.recallHistoryFingerprint,
+  });
+  if (
+    !plannerArtifact ||
+    String(plannerArtifact.recallArtifactId || "") !==
+      String(record.artifactId || "") ||
+    (plot.plannerArtifactId &&
+      String(plot.plannerArtifactId) !== String(plannerArtifact.artifactId || ""))
+  ) {
+    return {
+      valid: false,
+      reason: "durable-planner-artifact-unavailable",
+      targetUserMessageIndex,
+    };
+  }
+  return {
+    valid: true,
+    targetUserMessageIndex,
+    recallArtifact,
+    plannerArtifact,
+  };
+}
+
+function reportNoNewUserArtifactUnavailable(reason = "") {
+  const detail = String(reason || "durable-turn-artifacts-unavailable");
+  setLastRecallStatus(
+    "Reroll 记忆快照不可用",
+    `未重新运行召回或剧情规划 · ${detail}`,
+    "warning",
+    { syncRuntime: false },
+  );
+  console.warn("[ST-BME] no-new-user generation has no reusable durable artifact pair", {
+    reason: detail,
+  });
+}
+
+async function runBmeRecallAgent({
+  graph = conversationWorkspace.graph,
+  recallInput = {},
+  userMessage = "",
+  recentMessages = [],
+  embeddingConfig = {},
+  schema = [],
+  settings = getSettings(),
+  options = {},
+  signal = null,
+} = {}) {
+  const captured = captureBmeMemoryConversation();
+  const lifecycle = ensureBmeMemoryLifecycle();
+  if (!captured || !lifecycle) {
+    throw new Error("BME Agent 记忆账本尚未准备好");
+  }
+  const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+    reason: "pre-recall",
+    wakeSteward: false,
+  });
+  if (signal?.aborted) throw signal.reason || createAbortError("recall cancelled");
+  const result = await lifecycle.recall({
+    identity: captured.identity,
+    conversationSnapshot: captured.conversationSnapshot,
+    userMessage,
+    userFloor: recallInput?.targetUserMessageIndex,
+    recentMessages,
+    previousGraph: initialized?.projection?.graph || graph,
+    schema,
+    embeddingConfig,
+    retrievalSettings: settings,
+    retrievalOptions: options,
+    signal,
+  });
+  if (
+    !conversationWorkspace.isLeaseCurrent(captured.lease, {
+      requireGeneration: Boolean(captured.lease?.generationId),
+    })
+  ) {
+    throw createAbortError("recall-context-changed");
+  }
+  return result;
+}
+
 async function runPlannerRecallForEna({
   rawUserInput,
   signal = undefined,
   disableLlmRecall = false,
 } = {}) {
-  return await runPlannerRecallForEnaController(
-    {
-      buildRecallRecentMessages,
-      buildRecallRetrieveOptions,
-      captureConversationLease: (...args) =>
-        conversationWorkspace.captureLease(...args),
-      clampInt,
-      console,
-      createAbortError,
-      ensureVectorReadyIfNeeded,
-      formatInjection,
-      getContext,
-      getCurrentGraph: () => conversationWorkspace.graph,
-      getEmbeddingConfig,
-      getSchema,
-      getSettings,
-      isGraphMetadataWriteAllowed,
-      isGraphReadableForRecall,
-      isConversationLeaseCurrent: (...args) =>
-        conversationWorkspace.isLeaseCurrent(...args),
-      isTrivialUserInput,
-      normalizeRecallInputText,
-      recoverHistoryIfNeeded,
-      retrieve,
-    },
-    {
-      rawUserInput,
-      signal,
-      disableLlmRecall,
-    },
+  const normalizedInput = normalizeRecallInputText(rawUserInput);
+  if (!normalizedInput || isTrivialUserInput(normalizedInput)?.trivial) {
+    return { ok: false, empty: true, memoryBlock: "", recentMessages: [], result: null };
+  }
+  const settings = getSettings();
+  const context = getContext();
+  const recentMessages = buildRecallRecentMessages(
+    context?.chat,
+    clampInt(settings.recallLlmContextMessages, 4, 0, 20),
+    normalizedInput,
   );
+  const result = await runBmeRecallAgent({
+    graph: conversationWorkspace.graph,
+    recallInput: { source: "planner-handoff", targetUserMessageIndex: null },
+    userMessage: normalizedInput,
+    recentMessages,
+    embeddingConfig: getEmbeddingConfig(),
+    schema: getSchema(),
+    settings: disableLlmRecall ? { ...settings, recallEnableLLM: false } : settings,
+    options: buildRecallRetrieveOptions(settings, context),
+    signal,
+  });
+  return {
+    ok: true,
+    empty: result.empty === true,
+    memoryBlock: String(result.injectionText || ""),
+    recentMessages,
+    result,
+  };
+}
+
+async function validatePlannerPlotHistoryRecords(records = []) {
+  if (!Array.isArray(records) || records.length === 0) return [];
+  const captured = captureBmeMemoryConversation();
+  const lifecycle = ensureBmeMemoryLifecycle();
+  if (!captured || !lifecycle) return [];
+  const validated = await lifecycle.validatePlannerHistoryRecords(
+    captured.chatId,
+    records,
+  );
+  if (
+    !conversationWorkspace.isLeaseCurrent(captured.lease, {
+      requireGeneration: false,
+    })
+  ) {
+    return [];
+  }
+  return validated;
 }
 /**
  * 召回管线：检索并注入记忆
@@ -15775,10 +16172,10 @@ async function runRecall(options = {}) {
       isGraphReadableForRecall,
       nextRecallRunSequence: () => ++conversationWorkspace.recallRunSequence,
       readPersistedRecallFromUserMessage,
-      recoverHistoryIfNeeded,
+      recoverHistoryIfNeeded: prepareBmeMemoryLedgerForRecall,
       refreshPanelLiveState,
       resolveRecallInput,
-      retrieve,
+      retrieve: runBmeRecallAgent,
       schedulePersistedRecallMessageUiRefresh,
       setActiveRecallPromise: (value) => {
         conversationWorkspace.activeRecallPromise = value;
@@ -15861,6 +16258,7 @@ function onChatChanged() {
         allowOverride: true,
         applyEmptyState: true,
       });
+      await scheduleBmeMemoryLifecycle("chat-changed", { wakeSteward: true });
     }
   });
 
@@ -15896,6 +16294,7 @@ function onChatLoaded() {
         allowOverride: true,
         applyEmptyState: true,
       });
+      await scheduleBmeMemoryLifecycle("chat-loaded", { wakeSteward: true });
     }
   });
 
@@ -15904,6 +16303,145 @@ function onChatLoaded() {
   }
 
   return result;
+}
+
+function plannerPlotPublicationFingerprint(plot = {}) {
+  const value = plot && typeof plot === "object" ? plot : {};
+  return hashRecallInput(
+    JSON.stringify([
+      String(value.recallHandoffId || ""),
+      String(value.recallArtifactId || ""),
+      String(value.recallTurnId || ""),
+      String(value.recallInputFingerprint || ""),
+      String(value.recallHistoryFingerprint || ""),
+      String(value.inputHash || ""),
+      String(value.createdAt || ""),
+      String(value.plotText || ""),
+      Array.isArray(value.plotBlocks) ? value.plotBlocks : [],
+    ]),
+  );
+}
+
+function findPlannerPublicationTarget(chat, fingerprint, preferredIndex = null) {
+  if (!Array.isArray(chat) || !fingerprint) return null;
+  const indexes = Number.isFinite(preferredIndex)
+    ? [Math.floor(Number(preferredIndex)), ...chat.map((_, index) => index)]
+    : chat.map((_, index) => index);
+  for (const index of [...new Set(indexes)]) {
+    if (!chat[index]?.is_user) continue;
+    const plot = readStructuredPlotRecordFromMessage(chat[index]);
+    if (plannerPlotPublicationFingerprint(plot) === fingerprint) {
+      return { index, message: chat[index], plot };
+    }
+  }
+  return null;
+}
+
+function schedulePlannerArtifactPublication(messageId, { attempt = 0 } = {}) {
+  const context = getContext();
+  const hasMessageId = messageId !== null && messageId !== undefined && messageId !== "";
+  let index = hasMessageId && Number.isFinite(Number(messageId))
+    ? Math.floor(Number(messageId))
+    : null;
+  if (!Number.isFinite(index) && Array.isArray(context?.chat)) {
+    for (let cursor = context.chat.length - 1; cursor >= 0; cursor -= 1) {
+      if (!context.chat[cursor]?.is_user) continue;
+      index = cursor;
+      break;
+    }
+  }
+  const message = Number.isFinite(index) ? context?.chat?.[index] : null;
+  const plot = readStructuredPlotRecordFromMessage(message);
+  if (
+    !plot?.recallArtifactId ||
+    !plot?.recallTurnId ||
+    !plot?.recallInputFingerprint ||
+    plot?.plannerArtifactId
+  ) {
+    return null;
+  }
+  const capturedChatId = String(
+    plot.recallChatId || resolvePersistenceChatId(context),
+  ).trim();
+  const fingerprint = plannerPlotPublicationFingerprint(plot);
+  const jobKey = `${capturedChatId}:${plot.recallTurnId}:${fingerprint}`;
+  if (plannerArtifactPublicationJobs.has(jobKey)) {
+    return plannerArtifactPublicationJobs.get(jobKey);
+  }
+  const job = Promise.resolve()
+    .then(async () => {
+      const lifecycle = ensureBmeMemoryLifecycle();
+      if (!lifecycle) throw new Error("BME memory lifecycle is unavailable");
+      const published = await lifecycle.publishPlanner({
+        recallResult: {
+          artifactId: plot.recallArtifactId,
+          chatId: capturedChatId,
+          turnId: plot.recallTurnId,
+          inputFingerprint: plot.recallInputFingerprint,
+          historyFingerprint: plot.recallHistoryFingerprint,
+          memoryStateFingerprint: plot.recallMemoryStateFingerprint,
+          selectedMemoryIds: plot.recallSelectedMemoryIds,
+          candidateMemoryIds: plot.recallCandidateMemoryIds,
+        },
+        plotText: plot.plotText,
+        plotBlocks: plot.plotBlocks,
+        result: {
+          promptProfileId: plot.promptProfileId,
+          recallHandoffId: plot.recallHandoffId,
+        },
+      });
+      if (!published?.artifactId || !isBmeMemoryEventForCurrentChat(capturedChatId)) {
+        return published || null;
+      }
+      const activeContext = getContext();
+      const target = findPlannerPublicationTarget(
+        activeContext?.chat,
+        fingerprint,
+        index,
+      );
+      if (!target || target.plot.plannerArtifactId) return published;
+      writeStructuredPlotRecordToMessage(target.message, {
+        ...target.plot,
+        plannerArtifactId: published.artifactId,
+      });
+      triggerChatMetadataSave(activeContext, { immediate: false });
+      schedulePersistedRecallMessageUiRefresh(40);
+      return published;
+    })
+    .catch((error) => {
+      console.warn("[ST-BME] Planner Artifact 后台发布失败，保留消息待办重试:", error);
+      if (attempt < 2 && isBmeMemoryEventForCurrentChat(capturedChatId)) {
+        setTimeout(
+          () => schedulePlannerArtifactPublication(index, { attempt: attempt + 1 }),
+          500 * (attempt + 1),
+        );
+      }
+      return null;
+    })
+    .finally(() => {
+      if (plannerArtifactPublicationJobs.get(jobKey) === job) {
+        plannerArtifactPublicationJobs.delete(jobKey);
+      }
+    });
+  plannerArtifactPublicationJobs.set(jobKey, job);
+  return job;
+}
+
+function schedulePendingPlannerArtifactPublications(context = getContext()) {
+  if (!Array.isArray(context?.chat)) return 0;
+  let scheduled = 0;
+  for (let index = 0; index < context.chat.length; index += 1) {
+    const plot = readStructuredPlotRecordFromMessage(context.chat[index]);
+    if (
+      plot?.recallArtifactId &&
+      plot?.recallTurnId &&
+      plot?.recallInputFingerprint &&
+      !plot?.plannerArtifactId
+    ) {
+      if (schedulePlannerArtifactPublication(index)) scheduled += 1;
+    }
+  }
+  return scheduled;
 }
 
 function onMessageSent(messageId) {
@@ -15925,6 +16463,7 @@ function onMessageSent(messageId) {
   if (typeof scheduleMessageHideApply === "function") {
     scheduleMessageHideApply("message-sent", 40);
   }
+  void schedulePlannerArtifactPublication(messageId);
   return result;
 }
 
@@ -15945,7 +16484,6 @@ function onCharacterMessageRendered(messageId = null, type = "") {
     messageId,
     type,
   );
-  void maybeResumePendingAutoExtraction("character-message-rendered");
   return result;
 }
 
@@ -15955,7 +16493,8 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   });
   const result = onMessageDeletedController(
     {
-      checkpointHistoryMutation: inspectHistoryMutation,
+      checkpointHistoryMutation: () =>
+        scheduleBmeMemoryLifecycle("message-deleted", { wakeSteward: true }),
       getGenerationContext: () => conversationSession.getGeneration(),
       getContext,
       invalidateRecallAfterHistoryMutation,
@@ -15964,8 +16503,10 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
       noteAssistantTailDelete: (...args) =>
         conversationSession.noteAssistantTailDelete(...args),
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
-      scheduleDeferredHistoryMutationRecheck,
-      scheduleHistoryMutationRecheck,
+      scheduleDeferredHistoryMutationRecheck: () =>
+        scheduleBmeMemoryLifecycle("message-deleted", { wakeSteward: true }),
+      scheduleHistoryMutationRecheck: () =>
+        scheduleBmeMemoryLifecycle("message-deleted", { wakeSteward: true }),
     },
     chatLengthOrMessageId,
     meta,
@@ -15979,12 +16520,14 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
 function onMessageEdited(messageId, meta = null) {
   const result = onMessageEditedController(
     {
-      checkpointHistoryMutation: inspectHistoryMutation,
+      checkpointHistoryMutation: () =>
+        scheduleBmeMemoryLifecycle("message-edited", { wakeSteward: true }),
       invalidateRecallAfterHistoryMutation,
       isMvuExtraAnalysisGuardActive,
       removeMessageRecallRecord,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
-      scheduleHistoryMutationRecheck,
+      scheduleHistoryMutationRecheck: () =>
+        scheduleBmeMemoryLifecycle("message-edited", { wakeSteward: true }),
     },
     messageId,
     meta,
@@ -16014,11 +16557,26 @@ async function onMessageSwiped(messageId, meta = null) {
   conversationSession.noteSwipe(messageId, meta);
   const result = await onMessageSwipedController(
     {
-      checkpointHistoryMutation: inspectHistoryMutation,
+      checkpointHistoryMutation: () =>
+        scheduleBmeMemoryLifecycle("message-swiped", { wakeSteward: true }),
       invalidateRecallAfterHistoryMutation,
-      onReroll,
+      onReroll: async ({ fromFloor } = {}) => {
+        const reconciled = await scheduleBmeMemoryLifecycle("message-swiped", {
+          wakeSteward: true,
+        });
+        return {
+          success: Boolean(reconciled),
+          rollbackPerformed: Boolean(reconciled),
+          extractionTriggered: false,
+          requestedFloor: Number.isFinite(Number(fromFloor)) ? Number(fromFloor) : null,
+          effectiveFromFloor: Number.isFinite(Number(fromFloor)) ? Number(fromFloor) : null,
+          recoveryPath: "memory-ledger-reconciliation",
+          affectedBatchCount: 0,
+        };
+      },
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
-      scheduleHistoryMutationRecheck,
+      scheduleHistoryMutationRecheck: () =>
+        scheduleBmeMemoryLifecycle("message-swiped", { wakeSteward: true }),
     },
     messageId,
     meta,
@@ -16204,7 +16762,6 @@ function onGenerationEnded(_chatLength = null) {
       "",
   });
   schedulePersistedRecallMessageUiRefresh(320);
-  void maybeResumePendingAutoExtraction("generation-ended");
   if (typeof scheduleMessageHideApply === "function") {
     scheduleMessageHideApply("generation-ended", 180);
   }
@@ -16227,6 +16784,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
       clearPendingHostGenerationInputSnapshot,
       clearPendingRecallSendIntent,
       clearLiveRecallInjectionPromptForRewrite,
+      clearFinalRecallInjectionFailClosed,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       ensurePersistedRecallRecordForGeneration,
@@ -16243,6 +16801,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
       markCurrentGenerationTrivialSkip,
       markGenerationRecallTransactionHookState,
       reapplyPersistedRecallBlock,
+      validateNoNewUserTurnArtifacts,
       resolveGenerationRecallDeliveryMode,
       runRecall,
       storeGenerationRecallTransactionResult,
@@ -16260,6 +16819,7 @@ async function onBeforeCombinePrompts(promptData = null) {
       buildGenerationAfterCommandsRecallInput,
       buildHistoryGenerationRecallInput,
       buildNormalGenerationRecallInput,
+      clearFinalRecallInjectionFailClosed,
       clearPendingHostGenerationInputSnapshot,
       clearPendingRecallSendIntent,
       clearLiveRecallInjectionPromptForRewrite,
@@ -16279,6 +16839,8 @@ async function onBeforeCombinePrompts(promptData = null) {
       markCurrentGenerationTrivialSkip,
       markGenerationRecallTransactionHookState,
       reapplyPersistedRecallBlock,
+      validateNoNewUserTurnArtifacts,
+      reportNoNewUserArtifactUnavailable,
       resolveGenerationRecallDeliveryMode,
       runRecall,
       storeGenerationRecallTransactionResult,
@@ -16288,38 +16850,36 @@ async function onBeforeCombinePrompts(promptData = null) {
 }
 
 function onMessageReceived(messageId = null, type = "") {
-  const result = onMessageReceivedController({
-    console,
-    consumeCurrentGenerationTrivialSkip,
-    createRecallInputRecord,
-    deferAutoExtraction,
-    getContext,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
-    getIsHostGenerationRunning: () => conversationWorkspace.hostGeneration.running,
-    getLastProcessedAssistantFloor,
-    getPendingHostGenerationInputSnapshot,
-    getPendingRecallSendIntent: () =>
-      readConversationInput("pendingRecallSendIntent"),
-    getSettings,
-    isAssistantChatMessage,
-    isFreshRecallInputRecord,
-    isGraphMetadataWriteAllowed,
-    syncGraphLoadFromLiveContext,
-    maybeCaptureGraphShadowSnapshot,
-    maybeFlushQueuedGraphPersist,
-    notifyExtractionIssue,
-    queueMicrotask,
-    resolveAutoExtractionPlan,
-    runExtraction,
-    refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
-    setPendingHostGenerationInputSnapshot: (record) => {
-      writeConversationInput("pendingHostGenerationInputSnapshot", record);
-    },
-    setPendingRecallSendIntent: (record) => {
-      writeConversationInput("pendingRecallSendIntent", record);
-    },
-  }, messageId, type);
+  const context = getContext();
+  const chat = context?.chat;
+  const hasMessageId = messageId !== null && messageId !== undefined && messageId !== "";
+  const resolvedMessageId = hasMessageId && Number.isFinite(Number(messageId))
+    ? Math.floor(Number(messageId))
+    : Array.isArray(chat)
+      ? chat.length - 1
+      : null;
+  const message = Number.isFinite(resolvedMessageId) ? chat?.[resolvedMessageId] : null;
+  let queued = false;
+  if (isAssistantChatMessage(message)) {
+    if (consumeCurrentGenerationTrivialSkip(resolvedMessageId)) {
+      console.info?.("[ST-BME] trivial-input skip: Memory Steward bypassed", {
+        messageId: resolvedMessageId,
+      });
+    } else {
+      queued = Boolean(
+        scheduleBmeMemoryLifecycle("assistant-message-received", {
+          wakeSteward: true,
+        }),
+      );
+    }
+  }
+  schedulePersistedRecallMessageUiRefresh();
+  const result = {
+    messageId: resolvedMessageId,
+    type: String(type || ""),
+    queued,
+    owner: "memory-steward",
+  };
 
   const hideSettings =
     typeof getMessageHideSettings === "function"
@@ -16347,69 +16907,22 @@ async function onViewGraph() {
 }
 
 async function onRebuild() {
-  return await runWithRestoreLock(
-    "manual-rebuild",
-    "manual-rebuild",
-    async () =>
-      await onRebuildController({
-        buildRecoveryResult,
-        clearHistoryDirty,
-        clearInjectionState,
-        cloneGraphSnapshot,
-        confirm: (message) => {
-          if (typeof globalThis.confirm === "function") {
-            return globalThis.confirm(message);
-          }
-          return false;
-        },
-        createEmptyGraph,
-        ensureGraphMutationReady: (operationLabel, options = {}) =>
-          ensureGraphMutationReady(operationLabel, {
-            ...(options || {}),
-            ignoreRestoreLock: true,
-          }),
-        getContext,
-        getCurrentChatId,
-        getCurrentGraph: () => conversationWorkspace.graph,
-        getSettings,
-        normalizeGraphRuntimeState,
-        prepareVectorStateForReplay,
-        refreshPanelLiveState,
-        replayExtractionFromHistory,
-        restoreRuntimeUiState,
-        saveGraphToChat,
-        updateProcessedHistorySnapshot,
-        setCurrentGraph: (graph) => {
-          conversationWorkspace.graph = graph;
-        },
-        setLastExtractionStatus,
-        setRuntimeStatus,
-        snapshotRuntimeUiState,
-        toastr,
-      }),
-  );
-}
-
-async function onManualCompress() {
-  return await onManualCompressController({
-    buildMaintenanceSummary,
-    cloneGraphSnapshot,
-    compressAll,
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getEmbeddingConfig,
-    getSchema,
-    getSettings,
-    inspectCompressionCandidates: inspectAutoCompressionCandidates,
-    refreshPanelLiveState,
-    recordMaintenanceAction,
-    recordGraphMutation,
-    setRuntimeStatus,
-    toastr,
+  const confirmed =
+    typeof globalThis.confirm === "function" &&
+    globalThis.confirm(
+      "将把完整聊天证据交给 Memory Steward 重新审查。现有账本历史不会被物理删除，是否继续？",
+    );
+  if (!confirmed) return { queued: false, reason: "cancelled" };
+  return await requestMemoryStewardAction("rebuild", {
+    scope: "full-chat-evidence",
   });
 }
 
-function onSavePanelGraphNode(payload = {}) {
+async function onManualCompress() {
+  return await requestMemoryStewardAction("compress");
+}
+
+async function onSavePanelGraphNode(payload = {}) {
   const nodeId = String(payload.nodeId || "");
   const updates = payload.updates;
   if (!nodeId || !updates || typeof updates !== "object" || !conversationWorkspace.graph) {
@@ -16418,19 +16931,43 @@ function onSavePanelGraphNode(payload = {}) {
   if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
-  const updated = updateNode(conversationWorkspace.graph, nodeId, updates);
-  if (!updated) {
-    return { ok: false, error: "update-failed" };
+  try {
+    const captured = captureBmeMemoryConversation();
+    const lifecycle = ensureBmeMemoryLifecycle();
+    if (!captured || !lifecycle) {
+      return { ok: false, error: "memory-ledger-unavailable" };
+    }
+    const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+      reason: "panel-node-edit-prepare",
+      wakeSteward: false,
+    });
+    if (
+      !initialized ||
+      !conversationWorkspace.isLeaseCurrent(captured.lease, {
+        requireGeneration: false,
+      })
+    ) {
+      return { ok: false, error: "conversation-changed" };
+    }
+    const result = await lifecycle.reviseMemory(
+      captured.chatId,
+      nodeId,
+      updates,
+      captured.graph,
+    );
+    return {
+      ok: true,
+      revisionId: result.revision?.id || "",
+      staleUi: !conversationWorkspace.isLeaseCurrent(captured.lease, {
+        requireGeneration: false,
+      }),
+    };
+  } catch (error) {
+    return { ok: false, error: error?.message || "update-failed" };
   }
-  const persist = saveGraphToChat({ reason: "panel-node-edit" });
-  return {
-    ok: true,
-    persist,
-    persistBlocked: Boolean(persist?.blocked),
-  };
 }
 
-function onDeletePanelGraphNode(payload = {}) {
+async function onDeletePanelGraphNode(payload = {}) {
   const nodeId = String(payload.nodeId || "");
   if (!nodeId || !conversationWorkspace.graph) {
     return { ok: false, error: "invalid-payload" };
@@ -16438,16 +16975,39 @@ function onDeletePanelGraphNode(payload = {}) {
   if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
-  const removed = removeNode(conversationWorkspace.graph, nodeId);
-  if (!removed) {
-    return { ok: false, error: "delete-failed" };
+  try {
+    const captured = captureBmeMemoryConversation();
+    const lifecycle = ensureBmeMemoryLifecycle();
+    if (!captured || !lifecycle) {
+      return { ok: false, error: "memory-ledger-unavailable" };
+    }
+    const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+      reason: "panel-node-delete-prepare",
+      wakeSteward: false,
+    });
+    if (
+      !initialized ||
+      !conversationWorkspace.isLeaseCurrent(captured.lease, {
+        requireGeneration: false,
+      })
+    ) {
+      return { ok: false, error: "conversation-changed" };
+    }
+    const result = await lifecycle.archiveMemory(
+      captured.chatId,
+      nodeId,
+      captured.graph,
+    );
+    return {
+      ok: true,
+      revisionId: result.revision?.id || "",
+      staleUi: !conversationWorkspace.isLeaseCurrent(captured.lease, {
+        requireGeneration: false,
+      }),
+    };
+  } catch (error) {
+    return { ok: false, error: error?.message || "delete-failed" };
   }
-  const persist = saveGraphToChat({ reason: "panel-node-delete" });
-  return {
-    ok: true,
-    persist,
-    persistBlocked: Boolean(persist?.blocked),
-  };
 }
 
 function onApplyPanelKnowledgeOverride(payload = {}) {
@@ -16728,6 +17288,12 @@ async function onExportGraph() {
 }
 
 async function onImportGraph() {
+  const captured = captureBmeMemoryConversation();
+  const lifecycle = ensureBmeMemoryLifecycle();
+  if (!captured || !lifecycle) {
+    toastr.warning("当前聊天的记忆账本尚未准备好", "ST-BME");
+    return { cancelled: true, reason: "memory-ledger-unavailable" };
+  }
   return await runWithRestoreLock(
     "graph-import",
     "graph-import",
@@ -16748,9 +17314,28 @@ async function onImportGraph() {
         markVectorStateDirty,
         normalizeGraphRuntimeState,
         rebindProcessedHistoryStateToChat,
-        saveGraphToChat,
-        setCurrentGraph: (graph) => {
-          conversationWorkspace.graph = graph;
+        replaceGraphWithLedger: async (graph, options = {}) => {
+          const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+            reason: "manual-graph-import-prepare",
+            wakeSteward: false,
+          });
+          if (
+            !initialized ||
+            !conversationWorkspace.isLeaseCurrent(captured.lease, {
+              requireGeneration: false,
+            })
+          ) {
+            throw new Error("导入期间聊天已切换，已取消且未修改记忆账本");
+          }
+          const result = await lifecycle.replaceWithGraphSnapshot(captured.chatId, graph, options);
+          if (
+            !conversationWorkspace.isLeaseCurrent(captured.lease, {
+              requireGeneration: false,
+            })
+          ) {
+            throw new Error("导入已提交到原聊天，但当前聊天已切换；未修改当前聊天界面");
+          }
+          return result;
         },
         setExtractionCount: (value) => {
           conversationWorkspace.extractionCount = value;
@@ -16810,238 +17395,90 @@ async function onFetchEmbeddingModels(mode = null) {
   );
 }
 
+async function requestMemoryStewardAction(intent = "review", payload = {}) {
+  const captured = captureBmeMemoryConversation();
+  const lifecycle = ensureBmeMemoryLifecycle();
+  if (!captured || !lifecycle) {
+    toastr.warning("当前聊天的记忆账本尚未准备好", "ST-BME");
+    return { queued: false, reason: "memory-ledger-unavailable" };
+  }
+  const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+    reason: `manual-${intent}`,
+    wakeSteward: false,
+  });
+  await lifecycle.requestSteward(captured.chatId, { intent, payload });
+  void lifecycle.wakeSteward(captured.chatId, {
+    previousGraph: initialized?.projection?.graph || captured.graph,
+    reason: `manual-${intent}`,
+  }).catch((error) => console.warn("[ST-BME] 手动 Memory Steward 任务失败:", error));
+  const uiCurrent = conversationWorkspace.isLeaseCurrent(captured.lease, {
+    requireGeneration: false,
+  });
+  if (uiCurrent) {
+    setLastExtractionStatus("已交给 Memory Steward", "后台整理不会阻塞当前聊天或召回", "success", {
+      syncRuntime: false,
+    });
+  }
+  return { queued: true, background: true, intent, staleUi: !uiCurrent };
+}
+
 async function onManualExtract(options = {}) {
-  return await onManualExtractController(
-    {
-      beginStageAbortController,
-      clampInt,
-      console,
-      createEmptyGraph,
-      ensureGraphMutationReady,
-      executeExtractionBatch,
-      finishStageAbortController,
-      getAssistantTurns,
-      getContext,
-      getCurrentChatId,
-      getCurrentGraph: () => conversationWorkspace.graph,
-      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
-      getIsExtracting: () => conversationWorkspace.isExtracting,
-      getLastProcessedAssistantFloor,
-      getSettings,
-      isAbortError,
-      normalizeGraphRuntimeState,
-      recoverHistoryIfNeeded,
-      refreshPanelLiveState,
-      retryPendingGraphPersist,
-      setCurrentGraph: (graph) => {
-        conversationWorkspace.graph = graph;
-      },
-      setIsExtracting: (value) => {
-        conversationWorkspace.isExtracting = value;
-      },
-      setLastExtractionStatus,
-      toastr,
-    },
-    options,
-  );
+  return await requestMemoryStewardAction("extract", options);
 }
 
 async function onExtractionTask(options = {}) {
-  return await onExtractionTaskController(
-    {
-      beginStageAbortController,
-      buildRecoveryResult,
-      clampInt,
-      clearHistoryDirty,
-      cloneGraphSnapshot,
-      console,
-      createEmptyGraph,
-      ensureGraphMutationReady,
-      executeExtractionBatch,
-      finishStageAbortController,
-      getAssistantTurns,
-      getContext,
-      getCurrentChatId,
-      getCurrentGraph: () => conversationWorkspace.graph,
-      getGraphMutationBlockReason,
-      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
-      getIsExtracting: () => conversationWorkspace.isExtracting,
-      getLastExtractionStatusLevel: () => conversationWorkspace.lastExtractionStatus?.level || "idle",
-      getLastProcessedAssistantFloor,
-      getSettings,
-      isAbortError,
-      markHistoryDirty,
-      normalizeGraphRuntimeState,
-      onManualExtract,
-      persistDetachedRecoveryGraph,
-      recoverHistoryIfNeeded,
-      refreshPanelLiveState,
-      retryPendingGraphPersist,
-      rollbackGraphForReroll,
-      saveGraphToChat,
-      setCurrentGraph: (graph) => {
-        conversationWorkspace.graph = graph;
-      },
-      setIsExtracting: (value) => {
-        conversationWorkspace.isExtracting = value;
-      },
-      setLastExtractionStatus,
-      setRuntimeStatus,
-      toastr,
-      updateProcessedHistorySnapshot,
-    },
-    options,
-  );
+  return await requestMemoryStewardAction("review", options);
 }
 
 async function onReroll({ fromFloor } = {}) {
-  return await onRerollController(
-    {
-      console,
-      buildRecoveryResult,
-      clearHistoryDirty,
-      cloneGraphSnapshot,
-      ensureGraphMutationReady,
-      getAssistantTurns,
-      getContext,
-      getCurrentGraph: () => conversationWorkspace.graph,
-      getGraphMutationBlockReason,
-      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
-      getIsExtracting: () => conversationWorkspace.isExtracting,
-      getLastExtractionStatusLevel: () => conversationWorkspace.lastExtractionStatus?.level || "idle",
-      getLastProcessedAssistantFloor,
-      isAbortError,
-      markHistoryDirty,
-      normalizeGraphRuntimeState,
-      onManualExtract,
-      persistDetachedRecoveryGraph,
-      refreshPanelLiveState,
-      rollbackGraphForReroll,
-      saveGraphToChat,
-      setCurrentGraph: (graph) => {
-        conversationWorkspace.graph = graph;
-      },
-      setLastExtractionStatus,
-      setRuntimeStatus,
-      toastr,
-      updateProcessedHistorySnapshot,
-    },
-    { fromFloor },
-  );
+  const reconciled = await scheduleBmeMemoryLifecycle("manual-reroll", {
+    wakeSteward: true,
+  });
+  return {
+    success: Boolean(reconciled),
+    rollbackPerformed: Boolean(reconciled),
+    extractionTriggered: false,
+    requestedFloor: Number.isFinite(Number(fromFloor)) ? Number(fromFloor) : null,
+    recoveryPath: "memory-ledger-reconciliation",
+  };
 }
 
 async function onManualSleep() {
-  return await onManualSleepController({
-    buildMaintenanceSummary,
-    cloneGraphSnapshot,
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getSettings,
-    refreshPanelLiveState,
-    recordMaintenanceAction,
-    recordGraphMutation,
-    setRuntimeStatus,
-    sleepCycle,
-    toastr,
-  });
+  return await requestMemoryStewardAction("forget");
 }
 
 async function onManualSynopsis() {
-  return await onManualSynopsisController({
-    ensureGraphMutationReady,
-    generateSmallSummary,
-    getCurrentChatSeq,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getContext,
-    getSettings,
-    refreshPanelLiveState,
-    saveGraphToChat,
-    setRuntimeStatus,
-    toastr,
-  });
+  return await requestMemoryStewardAction("summarize");
 }
 
 async function onManualSummaryRollup() {
-  return await onManualSummaryRollupController({
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getSettings,
-    refreshPanelLiveState,
-    rollupSummaryFrontier,
-    saveGraphToChat,
-    setRuntimeStatus,
-    toastr,
-  });
+  return await requestMemoryStewardAction("summarize");
 }
 
 async function onRebuildSummaryState(options = {}) {
-  return await runWithRestoreLock(
-    "summary-rebuild",
-    "summary-rebuild",
-    async () =>
-      await onRebuildSummaryStateController(
-        {
-          ensureGraphMutationReady: (operationLabel, nextOptions = {}) =>
-            ensureGraphMutationReady(operationLabel, {
-              ...(nextOptions || {}),
-              ignoreRestoreLock: true,
-            }),
-          getContext,
-          getCurrentGraph: () => conversationWorkspace.graph,
-          getSettings,
-          rebuildHierarchicalSummaryState,
-          refreshPanelLiveState,
-          saveGraphToChat,
-          setRuntimeStatus,
-          toastr,
-        },
-        options,
-      ),
-  );
+  return await requestMemoryStewardAction("summarize", {
+    mode: "rebuild-summary-frontier",
+    ...options,
+  });
 }
 
 async function onClearSummaryState() {
-  return await onClearSummaryStateController({
-    confirm: (msg) => (typeof globalThis.confirm === "function" ? globalThis.confirm(msg) : false),
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    refreshPanelLiveState,
-    resetHierarchicalSummaryState,
-    saveGraphToChat,
-    setRuntimeStatus,
-    toastr,
+  const confirmed =
+    typeof globalThis.confirm === "function" &&
+    globalThis.confirm("将请求 Memory Steward 归档当前总结修订，是否继续？");
+  if (!confirmed) return { queued: false, reason: "cancelled" };
+  return await requestMemoryStewardAction("summarize", {
+    mode: "archive-summary-frontier",
   });
 }
 
 async function onManualEvolve() {
-  return await onManualEvolveController({
-    buildMaintenanceSummary,
-    cloneGraphSnapshot,
-    consolidateMemories,
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    getEmbeddingConfig,
-    getLastExtractedItems: () => conversationWorkspace.lastExtractedItems,
-    getSettings,
-    refreshPanelLiveState,
-    recordMaintenanceAction,
-    recordGraphMutation,
-    setRuntimeStatus,
-    toastr,
-    validateVectorConfig,
-  });
+  return await requestMemoryStewardAction("evolve");
 }
 
 async function onUndoLastMaintenance() {
-  return await onUndoLastMaintenanceController({
-    ensureGraphMutationReady,
-    getCurrentGraph: () => conversationWorkspace.graph,
-    markVectorStateDirty,
-    refreshPanelLiveState,
-    saveGraphToChat,
-    setRuntimeStatus,
-    toastr,
-    undoLastMaintenance: undoLastMaintenanceAction,
+  return await requestMemoryStewardAction("undo", {
+    scope: "latest-memory-maintenance",
   });
 }
 
@@ -17144,6 +17581,59 @@ const _cleanupRuntime = () => ({
   exportDiagnosticsBundle: async (options = {}) => await exportAuthorityDiagnosticsBundle(options),
   getCurrentChatId,
   getCurrentGraph: () => conversationWorkspace.graph,
+  archiveAllGraphMemories: async (options = {}) => {
+    const captured = captureBmeMemoryConversation();
+    const lifecycle = ensureBmeMemoryLifecycle();
+    if (!captured || !lifecycle) throw new Error("当前聊天的记忆账本尚未准备好");
+    const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+      reason: "manual-clear-graph-prepare",
+      wakeSteward: false,
+    });
+    if (
+      !initialized ||
+      !conversationWorkspace.isLeaseCurrent(captured.lease, { requireGeneration: false })
+    ) {
+      throw new Error("操作期间聊天已切换，未修改记忆账本");
+    }
+    const result = await lifecycle.archiveAllMemories(
+      captured.chatId,
+      initialized.projection?.graph || captured.graph,
+      options,
+    );
+    if (
+      !conversationWorkspace.isLeaseCurrent(captured.lease, { requireGeneration: false })
+    ) {
+      throw new Error("归档已提交到原聊天，但当前聊天已切换；未修改当前聊天界面");
+    }
+    return result;
+  },
+  archiveGraphMemories: async (memoryIds, options = {}) => {
+    const captured = captureBmeMemoryConversation();
+    const lifecycle = ensureBmeMemoryLifecycle();
+    if (!captured || !lifecycle) throw new Error("当前聊天的记忆账本尚未准备好");
+    const initialized = await runBmeMemoryLifecycleSnapshot(captured, {
+      reason: "manual-clear-graph-range-prepare",
+      wakeSteward: false,
+    });
+    if (
+      !initialized ||
+      !conversationWorkspace.isLeaseCurrent(captured.lease, { requireGeneration: false })
+    ) {
+      throw new Error("操作期间聊天已切换，未修改记忆账本");
+    }
+    const result = await lifecycle.archiveMemories(
+      captured.chatId,
+      memoryIds,
+      initialized.projection?.graph || captured.graph,
+      options,
+    );
+    if (
+      !conversationWorkspace.isLeaseCurrent(captured.lease, { requireGeneration: false })
+    ) {
+      throw new Error("归档已提交到原聊天，但当前聊天已切换；未修改当前聊天界面");
+    }
+    return result;
+  },
   setLastVectorStatus,
   markVectorStateDirty: (reason) => {
     if (conversationWorkspace.graph?.vectorIndexState) {
@@ -17795,6 +18285,7 @@ async function onCompactLukerSidecar() {
         allowOverride: true,
         applyEmptyState: true,
       });
+      await scheduleBmeMemoryLifecycle("initial-load", { wakeSteward: true });
     });
   } catch (bootError) {
     console.error("[ST-BME] 核心初始化阶段失败（面板入口已保留）:", bootError);
@@ -17815,6 +18306,7 @@ async function onCompactLukerSidecar() {
       isTrivialUserInput,
       preparePlannerTurnHandoff,
       runPlannerRecallForEna,
+      validatePlannerPlotHistoryRecords,
       shouldSendOnEnter: () => {
         const decision = getContext()?.shouldSendOnEnter?.();
         return decision == null ? true : decision === true;
