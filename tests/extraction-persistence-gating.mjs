@@ -4,7 +4,10 @@ import {
   executeExtractionBatchController,
   replayExtractionFromHistoryController,
 } from "../maintenance/extraction-controller.js";
-import { buildChatHistoryFingerprint } from "../runtime/runtime-state.js";
+import {
+  buildChatHistoryFingerprint,
+  buildChatStructureFingerprint,
+} from "../runtime/runtime-state.js";
 import {
   createBatchStatusSkeleton,
   finalizeBatchStatus,
@@ -68,6 +71,7 @@ function createRuntime(persistResult, { checkpointError = null } = {}) {
       return JSON.parse(JSON.stringify(value));
     },
     buildChatHistoryFingerprint,
+    buildChatStructureFingerprint,
     markHistoryDirty(targetGraph, floor, reason = "", source = "") {
       targetGraph.historyState ||= {};
       const currentFloor = targetGraph.historyState.historyDirtyFrom;

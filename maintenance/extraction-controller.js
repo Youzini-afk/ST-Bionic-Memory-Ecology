@@ -1282,8 +1282,10 @@ export async function executeExtractionBatchController(
   const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
   const workingGraph = runtime.cloneGraphSnapshot(beforeSnapshot);
   const batchChat = runtime.cloneGraphSnapshot(Array.isArray(chat) ? chat : []);
+  const buildStructuralFingerprint =
+    runtime.buildChatStructureFingerprint || runtime.buildChatHistoryFingerprint;
   const batchHistoryFingerprint =
-    runtime.buildChatHistoryFingerprint(batchChat);
+    buildStructuralFingerprint(batchChat);
   const sourceHostContext = runtime.captureHostTransactionContext?.() || null;
   const conversationLease = runtime.captureConversationLease?.() || null;
   const batchChatId = String(
@@ -1312,7 +1314,7 @@ export async function executeExtractionBatchController(
         ) !== false,
       historyCurrent:
         !checkHistory ||
-        runtime.buildChatHistoryFingerprint(activeChat) ===
+        buildStructuralFingerprint(activeChat) ===
           batchHistoryFingerprint,
     };
   };

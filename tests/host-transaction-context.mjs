@@ -10,6 +10,7 @@ import {
 import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 import {
   buildChatHistoryFingerprint,
+  buildChatStructureFingerprint,
   detectHistoryMutation,
   PROCESSED_MESSAGE_HASH_VERSION,
   snapshotProcessedMessageHashes,
@@ -116,9 +117,14 @@ const enrichedChat = structuredClone(chat);
 enrichedChat[1].mes += "\n<!-- plugin draft -->";
 enrichedChat[1].extra = { generatedImage: "image://late-attachment" };
 assert.equal(
+  buildChatStructureFingerprint(enrichedChat),
+  buildChatStructureFingerprint(chat),
+  "post-generation content enrichment must not invalidate structural work",
+);
+assert.notEqual(
   buildChatHistoryFingerprint(enrichedChat),
   buildChatHistoryFingerprint(chat),
-  "post-generation content enrichment must not invalidate structural work",
+  "content-sensitive recovery guards must still observe an edit during a transaction",
 );
 const integrityOnly = detectHistoryMutation(enrichedChat, {
   lastProcessedAssistantFloor: 1,

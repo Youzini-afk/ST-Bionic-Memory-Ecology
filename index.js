@@ -403,6 +403,7 @@ import {
   appendBatchJournal,
   appendMaintenanceJournal,
   buildChatHistoryFingerprint,
+  buildChatStructureFingerprint,
   buildRecoveryResult,
   buildReverseJournalRecoveryPlan,
   clearHistoryDirty,
@@ -13798,7 +13799,7 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
         "balanced",
     ).trim() || "balanced";
   const hostLineage = resolveCurrentChatIdentity(getContext())?.hostLineage || null;
-  const historyFingerprint = buildChatHistoryFingerprint(getContext()?.chat || []);
+  const historyFingerprint = buildChatStructureFingerprint(getContext()?.chat || []);
   const coalesced = backgroundVectorSyncCoalescer.enqueue({
     ...normalizedTask,
     chatId,
@@ -13839,7 +13840,7 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
               currentIdentity?.hostLineage?.conversationId || "",
             ),
             hostBranchId: String(currentIdentity?.hostLineage?.branchId || ""),
-            historyFingerprint: buildChatHistoryFingerprint(getContext()?.chat || []),
+            historyFingerprint: buildChatStructureFingerprint(getContext()?.chat || []),
           };
         };
         if (
@@ -15227,6 +15228,7 @@ async function executeExtractionBatch({
       appendBatchJournal,
       applyProcessedHistorySnapshotToGraph,
       buildChatHistoryFingerprint,
+      buildChatStructureFingerprint,
       buildHostTransactionFence,
       buildPersistDelta,
       buildExtractionMessages,

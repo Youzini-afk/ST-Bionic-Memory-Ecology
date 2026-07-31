@@ -937,6 +937,20 @@ export function buildMessageHash(message) {
 }
 
 export function buildChatHistoryFingerprint(chat = []) {
+  const messageHashes = Array.isArray(chat)
+    ? chat.map((message) => buildMessageHash(message))
+    : [];
+  return String(
+    stableHashString(
+      JSON.stringify({
+        version: PROCESSED_MESSAGE_HASH_VERSION,
+        messageHashes,
+      }),
+    ),
+  );
+}
+
+export function buildChatStructureFingerprint(chat = []) {
   const messageIdentities = Array.isArray(chat)
     ? chat.map((message, index) => buildStructuralMessageIdentity(message, index))
     : [];

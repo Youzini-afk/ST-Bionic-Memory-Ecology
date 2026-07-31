@@ -3,6 +3,7 @@ import {
   MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
   appendBatchJournal,
   buildChatHistoryFingerprint,
+  buildChatStructureFingerprint,
   clearHistoryDirty,
   cloneGraphSnapshot,
   createBatchJournalEntry,
@@ -101,9 +102,13 @@ assert.equal(
   buildChatHistoryFingerprint(bmeHiddenChat),
   buildChatHistoryFingerprint(chat),
 );
-assert.equal(
+assert.notEqual(
   buildChatHistoryFingerprint(editedChat),
   buildChatHistoryFingerprint(chat),
+);
+assert.equal(
+  buildChatStructureFingerprint(editedChat),
+  buildChatStructureFingerprint(chat),
 );
 
 assert.equal(
