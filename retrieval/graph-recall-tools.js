@@ -1,5 +1,10 @@
 import { cloneDomainValue } from "../domain/memory-id.js";
 import { getActiveNodes } from "../graph/graph.js";
+import {
+  normalizeRecallInjectionPlan,
+  RECALL_INJECTION_ROLES,
+  RECALL_INJECTION_STRATEGIES,
+} from "./recall-injection-plan.js";
 
 function toolDefinition(name, description, properties = {}, required = []) {
   return {
@@ -140,7 +145,7 @@ export class GraphRecallAgentToolset {
       registry.register(
         toolDefinition(
           "recall_context",
-          "Read the frozen turn, deterministic first-recollection candidates, vector state, and baseline selection.",
+          "第一步使用。返回冻结的本轮输入、最近对话、快速候选、程序基线、剧情时间、场景人物 ownerKey 候选与向量状态。只读；不会启动新召回，也不会等待后台维护。",
         ),
         async (_args, scope) => await this.context(scope),
         { readOnly: true, idempotent: true },
@@ -150,12 +155,12 @@ export class GraphRecallAgentToolset {
       registry.register(
         toolDefinition(
           "recall_search",
-          "Search the full current chat memory graph when the initial candidates are insufficient.",
+          "仅在快速候选存在明确缺口时搜索当前聊天的完整冻结图谱。返回经过作用域与认知边界过滤的候选；可按记忆类型、层级和 owner 缩小范围。不会修改图谱。",
           {
-            query: { type: "string", minLength: 1 },
-            memoryTypes: stringArraySchema(),
-            layers: stringArraySchema(),
-            ownerIds: stringArraySchema(),
+            query: { type: "string", minLength: 1, description: "面向语义检索的具体问题或线索。" },
+            memoryTypes: stringArraySchema("可选的记忆类型过滤，例如 event、pov_memory、rule。"),
+            layers: stringArraySchema("可选的记忆层过滤，例如 objective、pov、derived。"),
+            ownerIds: stringArraySchema("可选的 POV owner 标识过滤。"),
             limit: { type: "integer", minimum: 1, maximum: 80 },
           },
           ["query"],
@@ -168,8 +173,8 @@ export class GraphRecallAgentToolset {
       registry.register(
         toolDefinition(
           "recall_get",
-          "Read exact active graph nodes by stable memoryId.",
-          { memoryIds: stringArraySchema() },
+          "按稳定 memoryId 读取当前冻结图谱中的真实节点字段、作用域、剧情时间、重要度与置信度。未知、归档或当前认知边界不可注入的 ID 会列入 missingMemoryIds。只读。",
+          { memoryIds: stringArraySchema("只能使用召回工具已经返回的稳定 memoryId。") },
           ["memoryIds"],
         ),
         async (args, scope) => await this.get(args, scope),
@@ -180,7 +185,7 @@ export class GraphRecallAgentToolset {
       registry.register(
         toolDefinition(
           "recall_neighbors",
-          "Traverse current graph relations around one stable memoryId.",
+          "沿一个已授权 memoryId 的当前图谱关系查找前因、后果、人物、地点或规则邻居。返回的关系与邻居同样经过注入边界过滤；只读，不代表邻居必须入选。",
           {
             memoryId: { type: "string", minLength: 1 },
             direction: { type: "string", enum: ["in", "out", "both"] },
@@ -196,12 +201,49 @@ export class GraphRecallAgentToolset {
       registry.register(
         toolDefinition(
           "recall_publish",
-          "Publish exactly one validated selection for this turn. An empty selection is valid.",
+          "本轮唯一结算工具。提交受验证的注入计划与场景人物集合：items 为空表示 Agent 不额外召回节点，不会触发 Workflow 召回；常驻 core 与历史摘要仍由程序规则决定。服务端只从真实图谱节点生成注入正文，item.reason 与总 reason 仅供审计。",
           {
-            selectedMemoryIds: stringArraySchema(),
-            reason: { type: "string" },
+            items: {
+              type: "array",
+              maxItems: 80,
+              description: "按当前回复价值规划的记忆；同一 memoryId 只能出现一次。",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  memoryId: { type: "string", minLength: 1, maxLength: 256 },
+                  role: {
+                    type: "string",
+                    enum: [...RECALL_INJECTION_ROLES],
+                    description: "anchor=直接锚点；cause=前因后果；pov=主观认知；constraint=规则或承诺；background=少量背景。",
+                  },
+                  priority: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 5,
+                    description: "同一安全作用域内的优先级，5 最高。",
+                  },
+                  reason: {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: 500,
+                    description: "说明这条真实记忆对当前回复的具体作用；不进入注入正文。",
+                  },
+                },
+                required: ["memoryId", "role", "priority", "reason"],
+              },
+            },
+            activeOwnerKeys: stringArraySchema(
+              "Scene owner keys selected from recall_context.sceneOwnerCandidates.",
+            ),
+            strategy: {
+              type: "string",
+              enum: [...RECALL_INJECTION_STRATEGIES],
+              description: "focused=最小直接集；causal=因果链；pov=视角判断；timeline=时间连续；balanced=综合。",
+            },
+            reason: { type: "string", minLength: 1, maxLength: 1000 },
           },
-          ["selectedMemoryIds"],
+          ["items", "activeOwnerKeys", "strategy", "reason"],
         ),
         async (args, scope) => await this.publish(args, scope),
         { idempotent: true },
@@ -224,6 +266,17 @@ export class GraphRecallAgentToolset {
       ),
       channels: cloneDomainValue(workspace.packet.channels, {}),
       vectorState: cloneDomainValue(workspace.packet.vectorState, {}),
+      activeStoryTimeLabel: String(
+        workspace.packet?.baseline?.scopeContext?.activeStoryTimeLabel || "",
+      ),
+      sceneOwnerCandidates: cloneDomainValue(
+        workspace.packet?.baseline?.scopeContext?.sceneOwnerCandidates,
+        [],
+      ),
+      baselineActiveOwnerKeys: cloneDomainValue(
+        workspace.packet?.baseline?.scopeContext?.activeRecallOwnerKeys,
+        [],
+      ),
       activeMemoryCount: workspace.nodesById.size,
     };
   }
@@ -357,12 +410,24 @@ export class GraphRecallAgentToolset {
     };
   }
 
-  async publish({ selectedMemoryIds = [], reason = "" } = {}, scope) {
+  async publish(
+    { items = [], activeOwnerKeys = [], strategy = "balanced", reason = "" } = {},
+    scope,
+  ) {
     const workspace = this._workspace(scope);
     if (workspace.outcome.kind === "published") {
       return cloneDomainValue(workspace.outcome, workspace.outcome);
     }
-    const selected = uniqueStrings(selectedMemoryIds);
+    const normalizedPlan = normalizeRecallInjectionPlan({ items, strategy });
+    if (!normalizedPlan.valid) {
+      return {
+        published: false,
+        invalidSelection: true,
+        planIssues: normalizedPlan.issues,
+        instruction: "Fix the injection plan and call recall_publish again.",
+      };
+    }
+    const selected = normalizedPlan.plan.items.map((item) => item.memoryId);
     const authorized = new Set(
       await this._authorizedMemoryIds(workspace, selected, scope),
     );
@@ -377,10 +442,32 @@ export class GraphRecallAgentToolset {
         instruction: "Use stable memoryId values returned by recall tools.",
       };
     }
+    const availableOwnerKeys = new Set(
+      uniqueStrings(
+        (
+          workspace.packet?.baseline?.scopeContext?.sceneOwnerCandidates || []
+        ).map((candidate) => candidate?.ownerKey),
+      ),
+    );
+    const selectedOwnerKeys = uniqueStrings(activeOwnerKeys);
+    const missingOwnerKeys = selectedOwnerKeys.filter(
+      (ownerKey) => !availableOwnerKeys.has(ownerKey),
+    );
+    if (missingOwnerKeys.length) {
+      return {
+        published: false,
+        invalidSelection: true,
+        missingOwnerKeys,
+        instruction:
+          "Use ownerKey values returned by recall_context.sceneOwnerCandidates.",
+      };
+    }
     workspace.outcome = {
       kind: "published",
       published: true,
       selectedMemoryIds: selected,
+      activeOwnerKeys: selectedOwnerKeys,
+      injectionPlan: normalizedPlan.plan,
       reason: String(reason || "").trim(),
     };
     return cloneDomainValue(workspace.outcome, workspace.outcome);

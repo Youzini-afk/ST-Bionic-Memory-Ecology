@@ -42,13 +42,44 @@ const baseSettings = {
   agentMaxToolCalls: 500,
   agentMaxRunMs: 480000,
 };
+const agentPromptCalls = [];
+const agentPromptBuilder = async ({ taskType, toolSnapshot, assignment }) => {
+  agentPromptCalls.push({
+    taskType,
+    toolNames: toolSnapshot.catalog.map((tool) => tool.name),
+    assignment,
+  });
+  return {
+    messages: [
+      { role: "system", content: `independent profile: ${taskType}` },
+      { role: "system", content: JSON.stringify(toolSnapshot.catalog) },
+      { role: "user", content: JSON.stringify(assignment) },
+    ],
+    profileId: "test-agent-profile",
+    profileName: "Test Agent Profile",
+    toolSnapshotFingerprint: toolSnapshot.fingerprint,
+  };
+};
 
 const retrieveFn = async ({ graph: sourceGraph }) => ({
   selectedNodeIds: ["memory:baseline"],
   stats: { recallCount: 1 },
   meta: {
     retrieval: { source: "programmatic-test" },
-    scopeContext: { graph: sourceGraph, enableScopedMemory: false },
+    scopeContext: {
+      graph: sourceGraph,
+      enableScopedMemory: false,
+      activeStoryTimeLabel: "第二天清晨",
+      activeRecallOwnerKeys: ["character:baseline"],
+      sceneOwnerCandidates: [
+        {
+          ownerKey: "character:alice",
+          ownerName: "Alice",
+          score: 0.9,
+          reasons: ["direct participant"],
+        },
+      ],
+    },
   },
 });
 const resultBuilder = ({ graph: sourceGraph, selectedNodeIds, meta }) => {
@@ -77,6 +108,7 @@ const resultBuilder = ({ graph: sourceGraph, selectedNodeIds, meta }) => {
 };
 
 let modelCall = 0;
+let sawIndependentAgentPrompt = false;
 const selected = await retrieveWithGraphAgent({
   graph,
   userMessage: "Where is the archive key?",
@@ -90,8 +122,9 @@ const selected = await retrieveWithGraphAgent({
   options: { chatId: "chat:graph-agent", turnId: "turn:8" },
   retrieveFn,
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
-  model: async () => {
+  model: async (request) => {
     modelCall += 1;
     if (modelCall === 1) {
       return {
@@ -100,6 +133,9 @@ const selected = await retrieveWithGraphAgent({
       };
     }
     if (modelCall === 2) {
+      sawIndependentAgentPrompt = JSON.stringify(request?.messages || []).includes(
+        "independent profile: agent_recall",
+      );
       return {
         content: "",
         toolCalls: [
@@ -119,8 +155,17 @@ const selected = await retrieveWithGraphAgent({
             id: "publish",
             name: "recall_publish",
             arguments: JSON.stringify({
-              selectedMemoryIds: ["memory:deeper"],
-              reason: "Directly answers the turn",
+              items: [
+                {
+                  memoryId: "memory:deeper",
+                  role: "anchor",
+                  priority: 5,
+                  reason: "Directly answers the turn",
+                },
+              ],
+              activeOwnerKeys: ["character:alice"],
+              strategy: "focused",
+              reason: "Use the direct answer as the foreground anchor",
             }),
           },
         ],
@@ -137,6 +182,28 @@ assert.equal(
   "graph-agent-tool-selection",
 );
 assert.equal(selected.meta.retrieval.agent.toolCallCount, 3);
+assert.equal(sawIndependentAgentPrompt, true);
+assert.equal(agentPromptCalls[0].taskType, "agent_recall");
+assert.ok(agentPromptCalls[0].toolNames.includes("recall_publish"));
+assert.equal(agentPromptCalls[0].toolNames.includes("memory_task_profile"), false);
+assert.deepEqual(selected.meta.retrieval.agent.activeOwnerKeys, [
+  "character:alice",
+]);
+assert.deepEqual(selected.meta.scopeContext.activeRecallOwnerKeys, [
+  "character:alice",
+]);
+assert.deepEqual(selected.meta.retrieval.agent.injectionPlan, {
+  version: 1,
+  strategy: "focused",
+  items: [
+    {
+      memoryId: "memory:deeper",
+      role: "anchor",
+      priority: 5,
+      reason: "Directly answers the turn",
+    },
+  ],
+});
 
 const fallback = await retrieveWithGraphAgent({
   graph,
@@ -150,6 +217,7 @@ const fallback = await retrieveWithGraphAgent({
   options: { chatId: "chat:graph-agent", turnId: "turn:fallback" },
   retrieveFn,
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
   model: async () => {
     throw new Error("provider unavailable");
@@ -174,6 +242,7 @@ const guarded = await retrieveWithGraphAgent({
   options: { chatId: "chat:graph-agent", turnId: "turn:scope-guard" },
   retrieveFn,
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
   model: async () => {
     guardedModelCall += 1;
@@ -185,7 +254,9 @@ const guarded = await retrieveWithGraphAgent({
             id: "private",
             name: "recall_publish",
             arguments: JSON.stringify({
-              selectedMemoryIds: ["memory:private"],
+              items: [{ memoryId: "memory:private", role: "anchor", priority: 5, reason: "Attempt an out-of-scope selection" }],
+              activeOwnerKeys: [],
+              strategy: "focused",
               reason: "Attempt an out-of-scope selection",
             }),
           },
@@ -200,8 +271,27 @@ const guarded = await retrieveWithGraphAgent({
             id: "safe",
             name: "recall_publish",
             arguments: JSON.stringify({
-              selectedMemoryIds: ["memory:baseline"],
-              reason: "Use an injectable memory instead",
+              items: [{ memoryId: "memory:baseline", role: "anchor", priority: 5, reason: "Attempt an unknown scene owner" }],
+              activeOwnerKeys: ["character:mallory"],
+              strategy: "focused",
+              reason: "Attempt an unknown scene owner",
+            }),
+          },
+        ],
+      };
+    }
+    if (guardedModelCall === 3) {
+      return {
+        content: "",
+        toolCalls: [
+          {
+            id: "safe-owner",
+            name: "recall_publish",
+            arguments: JSON.stringify({
+              items: [{ memoryId: "memory:baseline", role: "anchor", priority: 5, reason: "Use an injectable memory" }],
+              activeOwnerKeys: ["character:alice"],
+              strategy: "focused",
+              reason: "Use an injectable memory and a valid scene owner",
             }),
           },
         ],
@@ -211,7 +301,7 @@ const guarded = await retrieveWithGraphAgent({
   },
 });
 assert.deepEqual(guarded.selectedNodeIds, ["memory:baseline"]);
-assert.equal(guarded.meta.retrieval.agent.toolCallCount, 2);
+assert.equal(guarded.meta.retrieval.agent.toolCallCount, 3);
 
 let snapshotModelCall = 0;
 const snapshotIsolated = await retrieveWithGraphAgent({
@@ -222,6 +312,7 @@ const snapshotIsolated = await retrieveWithGraphAgent({
   options: { chatId: "chat:graph-agent", turnId: "turn:frozen-graph" },
   retrieveFn,
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
   model: async () => {
     snapshotModelCall += 1;
@@ -234,7 +325,9 @@ const snapshotIsolated = await retrieveWithGraphAgent({
             id: "late",
             name: "recall_publish",
             arguments: JSON.stringify({
-              selectedMemoryIds: ["memory:late"],
+              items: [{ memoryId: "memory:late", role: "anchor", priority: 5, reason: "Try a late memory" }],
+              activeOwnerKeys: [],
+              strategy: "focused",
               reason: "Try a memory committed after the frozen snapshot",
             }),
           },
@@ -249,7 +342,9 @@ const snapshotIsolated = await retrieveWithGraphAgent({
             id: "snapshot-baseline",
             name: "recall_publish",
             arguments: JSON.stringify({
-              selectedMemoryIds: ["memory:baseline"],
+              items: [{ memoryId: "memory:baseline", role: "anchor", priority: 5, reason: "Use the frozen snapshot" }],
+              activeOwnerKeys: [],
+              strategy: "focused",
               reason: "Use the frozen snapshot",
             }),
           },
@@ -261,6 +356,47 @@ const snapshotIsolated = await retrieveWithGraphAgent({
 });
 assert.deepEqual(snapshotIsolated.selectedNodeIds, ["memory:baseline"]);
 
+let planOrderingCall = 0;
+const plannedOrdering = await retrieveWithGraphAgent({
+  graph,
+  userMessage: "Use the direct answer before its background.",
+  schema: DEFAULT_NODE_SCHEMA,
+  settings: baseSettings,
+  options: { chatId: "chat:graph-agent", turnId: "turn:planned-order" },
+  retrieveFn,
+  resultBuilder,
+  agentPromptBuilder,
+  countTokens: () => 100,
+  model: async () => {
+    planOrderingCall += 1;
+    if (planOrderingCall === 1) {
+      return {
+        content: "",
+        toolCalls: [
+          {
+            id: "publish-plan-order",
+            name: "recall_publish",
+            arguments: JSON.stringify({
+              items: [
+                { memoryId: "memory:baseline", role: "background", priority: 5, reason: "Supporting context" },
+                { memoryId: "memory:deeper", role: "anchor", priority: 4, reason: "Direct answer" },
+              ],
+              activeOwnerKeys: [],
+              strategy: "focused",
+              reason: "Put the direct answer before supporting context",
+            }),
+          },
+        ],
+      };
+    }
+    return { content: "published", toolCalls: [] };
+  },
+});
+assert.deepEqual(
+  plannedOrdering.scopeBuckets.objectiveGlobal.map((entry) => entry.id),
+  ["memory:deeper", "memory:baseline"],
+);
+
 const explicitEmpty = await retrieveWithGraphAgent({
   graph,
   userMessage: "This turn does not need memory.",
@@ -269,6 +405,7 @@ const explicitEmpty = await retrieveWithGraphAgent({
   options: { chatId: "chat:graph-agent", turnId: "turn:empty-selection" },
   retrieveFn,
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
   model: async () => ({
     content: "",
@@ -277,7 +414,9 @@ const explicitEmpty = await retrieveWithGraphAgent({
         id: "publish-empty",
         name: "recall_publish",
         arguments: JSON.stringify({
-          selectedMemoryIds: [],
+          items: [],
+          activeOwnerKeys: [],
+          strategy: "focused",
           reason: "No memory is relevant to this turn",
         }),
       },
@@ -286,6 +425,7 @@ const explicitEmpty = await retrieveWithGraphAgent({
 });
 assert.deepEqual(explicitEmpty.selectedNodeIds, []);
 assert.equal(explicitEmpty.meta.retrieval.llm.status, "llm");
+assert.equal(explicitEmpty.meta.retrieval.agent.injectionPlan.items.length, 0);
 
 const empty = await retrieveWithGraphAgent({
   graph: createEmptyGraph(),
@@ -299,6 +439,7 @@ const empty = await retrieveWithGraphAgent({
     meta: { retrieval: {}, scopeContext: {} },
   }),
   resultBuilder,
+  agentPromptBuilder,
   countTokens: () => 100,
   model: async () => {
     throw new Error("empty recall must not invoke the model");

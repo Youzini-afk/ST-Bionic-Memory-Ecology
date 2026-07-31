@@ -1,4 +1,4 @@
-import { buildGraphStewardMessages } from "../agent/graph-steward-prompt.js";
+import { buildAgentProfileMessages } from "../agent/profile-runtime.js";
 import { GraphStewardAgentToolset } from "../agent/graph-steward-tools.js";
 import { AgentToolRegistry } from "../agent/tool-registry.js";
 import { TransientAgentJournal } from "../agent/transient-journal.js";
@@ -20,6 +20,9 @@ export async function runGraphStewardAgent({
   journal = new TransientAgentJournal(),
   signal = null,
   instructions = "",
+  agentPromptBuilder = buildAgentProfileMessages,
+  taskPromptBuilder = null,
+  stPromptContext = null,
 } = {}) {
   const taskId = createDomainId("graph-steward-task", {
     chatId,
@@ -35,33 +38,57 @@ export async function runGraphStewardAgent({
   });
   const unregister = toolset.registerInto(registry);
   toolset.openTask({ runId, context, allowedCapabilities });
-  const runtime = createBmeAgentRuntime({
-    journal,
-    settings,
-    toolRegistry: registry,
-    ...(model ? { model } : {}),
-    ...(countTokens ? { countTokens } : {}),
-  });
   let runResult = null;
   let runError = null;
   try {
     try {
+      const prompt = await agentPromptBuilder({
+        settings,
+        taskType: "agent_steward",
+        toolSnapshot: registry.capture(),
+        assignment: {
+          chatId: String(chatId || ""),
+          startFloor: Number(startFloor),
+          endFloor: Number(endFloor),
+          instructions: String(instructions || "").trim(),
+          startWith: "memory_task_context",
+          settleWith: ["memory_run_pipeline", "memory_complete_without_changes"],
+        },
+        context: {
+          recentMessages: (context?.messages || [])
+            .map((message) => `#${message?.floor ?? "?"} [${message?.role || "unknown"}]: ${message?.content || ""}`)
+            .join("\n"),
+          chatMessages: (context?.messages || []).map((message) => ({
+            seq: Number(message?.floor),
+            role: String(message?.role || ""),
+            content: String(message?.content || ""),
+          })),
+          graphStats: context?.graphStats || {},
+        },
+        promptBuilder: taskPromptBuilder,
+        stPromptContext,
+      });
+      const runtime = createBmeAgentRuntime({
+        journal,
+        settings,
+        toolRegistry: registry,
+        ...(model ? { model } : {}),
+        ...(countTokens ? { countTokens } : {}),
+      });
       runResult = await runtime.run({
         chatId,
         taskId,
         runId,
         agentKind: "graph-memory-steward",
-        taskType: "memory_steward",
-        messages: buildGraphStewardMessages({
-          chatId,
-          startFloor,
-          endFloor,
-          instructions,
-        }),
+        taskType: "agent_steward",
+        messages: prompt.messages,
         metadata: {
           startFloor,
           endFloor,
           historyFingerprint: context?.historyFingerprint || "",
+          taskProfileId: prompt.profileId,
+          taskProfileName: prompt.profileName,
+          toolSnapshotFingerprint: prompt.toolSnapshotFingerprint,
         },
         signal,
       });

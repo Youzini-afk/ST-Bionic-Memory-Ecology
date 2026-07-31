@@ -47,11 +47,15 @@ installResolveHooks([
 
 const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompting/prompt-builder.js");
 const {
+  cloneTaskProfile,
   createBuiltinPromptBlock,
   createDefaultGlobalTaskRegex,
   createDefaultTaskProfiles,
+  upsertTaskProfile,
 } = await import("../prompting/prompt-profiles.js");
 const { initializeHostAdapter } = await import("../host/adapter/index.js");
+const { buildAgentProfileMessages } = await import("../agent/profile-runtime.js");
+const { AgentToolRegistry } = await import("../agent/tool-registry.js");
 
 const settings = {
   taskProfilesVersion: 3,
@@ -164,6 +168,74 @@ assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
 assert.match(String(recallFormatBlock?.content || ""), /selected_keys/);
 assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
 assert.match(String(recallRulesBlock?.content || ""), /评分召回/);
+
+const agentRecallPromptBuild = await buildTaskPrompt(settings, "agent_recall", {
+  taskName: "agent_recall",
+  charDescription: "角色描述",
+  userPersona: "用户设定",
+  agentToolCatalog: "recall_context: 读取上下文\nrecall_publish: 发布注入计划",
+  agentAssignment: '{"turnId":"turn:1","userMessage":"继续调查"}',
+});
+assert.equal(agentRecallPromptBuild.profile.taskType, "agent_recall");
+assert.deepEqual(
+  agentRecallPromptBuild.executionMessages
+    .map((message) => message.sourceKey)
+    .filter(Boolean),
+  [
+    "charDescription",
+    "userPersona",
+    "agentToolCatalog",
+    "agentAssignment",
+  ],
+);
+assert.match(JSON.stringify(agentRecallPromptBuild.executionMessages), /注入计划/);
+assert.doesNotMatch(JSON.stringify(agentRecallPromptBuild.executionMessages), /selected_keys/);
+assert.doesNotMatch(JSON.stringify(agentRecallPromptBuild.executionMessages), /执行用户当前启用的 Workflow/);
+
+const agentStewardPromptBuild = await buildTaskPrompt(settings, "agent_steward", {
+  taskName: "agent_steward",
+  agentToolCatalog: "memory_task_context: 读取批次\nmemory_run_pipeline: 原子结算",
+  agentAssignment: '{"startFloor":4,"endFloor":5}',
+});
+assert.equal(agentStewardPromptBuild.profile.taskType, "agent_steward");
+assert.match(JSON.stringify(agentStewardPromptBuild.executionMessages), /长期价值判断/);
+assert.doesNotMatch(JSON.stringify(agentStewardPromptBuild.executionMessages), /memory_task_profile/);
+
+const customAgentRecall = cloneTaskProfile(
+  settings.taskProfiles.agent_recall.profiles[0],
+  { taskType: "agent_recall", name: "我的独立 Agent 召回" },
+);
+customAgentRecall.blocks[0].content = "USER-CUSTOM-INDEPENDENT-AGENT-RECALL";
+const customAgentSettings = {
+  ...settings,
+  taskProfiles: upsertTaskProfile(
+    settings.taskProfiles,
+    "agent_recall",
+    customAgentRecall,
+    { setActive: true },
+  ),
+};
+const runtimeRegistry = new AgentToolRegistry();
+runtimeRegistry.register(
+  {
+    name: "recall_context",
+    description: "读取当前召回任务",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  async () => ({}),
+  { readOnly: true, idempotent: true },
+);
+const runtimeAgentPrompt = await buildAgentProfileMessages({
+  settings: customAgentSettings,
+  taskType: "agent_recall",
+  toolSnapshot: runtimeRegistry.capture(),
+  assignment: { turnId: "turn:custom" },
+  promptBuilder: buildTaskPrompt,
+  stPromptContext: {},
+});
+assert.match(JSON.stringify(runtimeAgentPrompt.messages), /USER-CUSTOM-INDEPENDENT-AGENT-RECALL/);
+assert.match(JSON.stringify(runtimeAgentPrompt.messages), /recall_context/);
+assert.equal(runtimeAgentPrompt.profileId, customAgentRecall.id);
 
 const globalRegexPromptBuild = await buildTaskPrompt(
   {

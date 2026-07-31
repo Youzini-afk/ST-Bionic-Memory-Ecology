@@ -2,6 +2,25 @@ import assert from "node:assert/strict";
 
 import { runGraphStewardAgent } from "../application/graph-steward-agent.js";
 
+const agentPromptCalls = [];
+const agentPromptBuilder = async ({ taskType, toolSnapshot, assignment }) => {
+  agentPromptCalls.push({
+    taskType,
+    toolNames: toolSnapshot.catalog.map((tool) => tool.name),
+    assignment,
+  });
+  return {
+    messages: [
+      { role: "system", content: `independent profile: ${taskType}` },
+      { role: "system", content: JSON.stringify(toolSnapshot.catalog) },
+      { role: "user", content: JSON.stringify(assignment) },
+    ],
+    profileId: "test-steward-profile",
+    profileName: "Test Steward Profile",
+    toolSnapshotFingerprint: toolSnapshot.fingerprint,
+  };
+};
+
 const base = {
   chatId: "chat:steward",
   startFloor: 4,
@@ -19,6 +38,7 @@ const base = {
     agentMaxRunMs: 480000,
   },
   countTokens: () => 100,
+  agentPromptBuilder,
 };
 
 let modelCall = 0;
@@ -72,6 +92,10 @@ const result = await runGraphStewardAgent({
 
 assert.equal(result.outcome.kind, "pipeline");
 assert.equal(pipelineCalls.length, 1);
+assert.equal(agentPromptCalls[0].taskType, "agent_steward");
+assert.ok(agentPromptCalls[0].toolNames.includes("memory_task_context"));
+assert.ok(agentPromptCalls[0].toolNames.includes("memory_run_pipeline"));
+assert.equal(agentPromptCalls[0].toolNames.includes("memory_task_profile"), false);
 assert.equal(pipelineCalls[0].capabilities.enableConsolidation, true);
 assert.equal(pipelineCalls[0].capabilities.enableHierarchicalSummary, false);
 assert.equal(pipelineCalls[0].capabilities.enableReflection, false);

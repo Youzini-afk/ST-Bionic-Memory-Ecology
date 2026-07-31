@@ -1,11 +1,12 @@
 import { GraphRecallAgentToolset } from "./graph-recall-tools.js";
 import { AgentToolRegistry } from "../agent/tool-registry.js";
 import { TransientAgentJournal } from "../agent/transient-journal.js";
-import { buildRecallAgentMessages } from "../agent/recall-agent-prompt.js";
+import { buildAgentProfileMessages } from "../agent/profile-runtime.js";
 import { createBmeAgentRunId } from "../agent/journal.js";
 import { cloneDomainValue, createDomainId } from "../domain/memory-id.js";
 import { createBmeAgentRuntime } from "../application/bme-agent-runtime.js";
 import { buildRecallCandidatePacket } from "./recall-candidate-packet.js";
+import { compareNodesByRecallInjectionPlan } from "./recall-injection-plan.js";
 
 async function loadWorkflowRetriever() {
   return (await import("./retriever.js")).retrieve;
@@ -62,6 +63,35 @@ async function filterPacketByInjectionScope(packet, authorizeMemoryIds) {
   };
 }
 
+function applyRecallInjectionPlanOrdering(result = {}, plan = null) {
+  if (!Array.isArray(plan?.items) || plan.items.length === 0) return result;
+  const sortNodes = (nodes) =>
+    Array.isArray(nodes)
+      ? [...nodes].sort((left, right) =>
+          compareNodesByRecallInjectionPlan(plan, left, right),
+        )
+      : nodes;
+  const buckets = result?.scopeBuckets;
+  if (!buckets || typeof buckets !== "object") return result;
+  const characterPovByOwner = Object.fromEntries(
+    Object.entries(buckets.characterPovByOwner || {}).map(([ownerKey, nodes]) => [
+      ownerKey,
+      sortNodes(nodes),
+    ]),
+  );
+  return {
+    ...result,
+    scopeBuckets: {
+      ...buckets,
+      characterPov: sortNodes(buckets.characterPov),
+      characterPovByOwner,
+      userPov: sortNodes(buckets.userPov),
+      objectiveCurrentRegion: sortNodes(buckets.objectiveCurrentRegion),
+      objectiveGlobal: sortNodes(buckets.objectiveGlobal),
+    },
+  };
+}
+
 async function buildResult({
   graph,
   schema,
@@ -76,6 +106,11 @@ async function buildResult({
   const selectionProtocol = fallback
     ? "graph-agent-programmatic-fallback"
     : "graph-agent-tool-selection";
+  const baselineScopeContext = packet?.baseline?.scopeContext || {};
+  const activeOwnerKeys =
+    outcome?.kind === "published"
+      ? uniqueMemoryIds(outcome?.activeOwnerKeys || [])
+      : uniqueMemoryIds(baselineScopeContext.activeRecallOwnerKeys || []);
   const retrievalMeta = {
     ...(packet.baseline?.retrievalMeta || {}),
     agent: {
@@ -87,11 +122,13 @@ async function buildResult({
       fallback,
       fallbackReason: String(fallbackReason || ""),
       reason: String(outcome?.reason || ""),
+      activeOwnerKeys,
+      injectionPlan: cloneDomainValue(outcome?.injectionPlan, null),
     },
     llm: {
       status: fallback ? "fallback" : "llm",
       reason: fallback
-        ? `Recall Agent 未完成选择，已使用程序召回：${fallbackReason}`
+        ? `Recall Agent 未能结算，已使用程序召回：${fallbackReason}`
         : outcome?.reason || "Recall Agent 已发布选择",
       selectionProtocol,
       rawSelectedKeys: [...selectedMemoryIds],
@@ -106,18 +143,28 @@ async function buildResult({
     },
   };
   const buildRetrievalResult = resultBuilder || (await loadResultBuilder());
-  return buildRetrievalResult({
+  const result = await buildRetrievalResult({
     graph,
     selectedNodeIds: selectedMemoryIds,
     schema,
     meta: {
       retrieval: retrievalMeta,
       scopeContext: {
-        ...(packet.baseline?.scopeContext || {}),
+        ...baselineScopeContext,
+        activeRecallOwnerKeys: activeOwnerKeys,
+        activeRecallOwnerKey: activeOwnerKeys[0] || "",
+        sceneOwnerResolutionMode:
+          outcome?.kind === "published"
+            ? "graph-agent"
+            : String(
+                baselineScopeContext.sceneOwnerResolutionMode || "unresolved",
+              ),
+        recallInjectionPlan: cloneDomainValue(outcome?.injectionPlan, null),
         graph,
       },
     },
   });
+  return applyRecallInjectionPlanOrdering(result, outcome?.injectionPlan);
 }
 
 export async function retrieveWithGraphAgent({
@@ -134,6 +181,9 @@ export async function retrieveWithGraphAgent({
   journal = new TransientAgentJournal(),
   retrieveFn = null,
   resultBuilder = null,
+  agentPromptBuilder = buildAgentProfileMessages,
+  taskPromptBuilder = null,
+  stPromptContext = null,
 } = {}) {
   const runRetrieve = retrieveFn || (await loadWorkflowRetriever());
   const buildRetrievalResult = resultBuilder || (await loadResultBuilder());
@@ -153,6 +203,11 @@ export async function retrieveWithGraphAgent({
   const authorizeMemoryIds = async ({ memoryIds = [] } = {}) => {
     const requested = uniqueMemoryIds(memoryIds);
     if (!requested.length) return [];
+    const exploratoryOwnerKeys = uniqueMemoryIds(
+      (rawPacket?.baseline?.scopeContext?.sceneOwnerCandidates || []).map(
+        (candidate) => candidate?.ownerKey,
+      ),
+    );
     const scopedResult = await buildRetrievalResult({
       graph: recallGraph,
       selectedNodeIds: requested,
@@ -160,6 +215,13 @@ export async function retrieveWithGraphAgent({
       meta: {
         scopeContext: {
           ...(rawPacket.baseline?.scopeContext || {}),
+          ...(exploratoryOwnerKeys.length
+            ? {
+                activeRecallOwnerKeys: exploratoryOwnerKeys,
+                activeRecallOwnerKey: exploratoryOwnerKeys[0],
+                sceneOwnerResolutionMode: "graph-agent-candidate-set",
+              }
+            : {}),
           graph: recallGraph,
         },
       },
@@ -188,7 +250,6 @@ export async function retrieveWithGraphAgent({
       resultBuilder: buildRetrievalResult,
     });
   }
-
   const registry = new AgentToolRegistry();
   const toolset = new GraphRecallAgentToolset({
     authorizeMemoryIds,
@@ -226,32 +287,49 @@ export async function retrieveWithGraphAgent({
     packet,
     signal,
   });
-  const runtime = createBmeAgentRuntime({
-    journal,
-    settings,
-    toolRegistry: registry,
-    ...(model ? { model } : {}),
-    ...(countTokens ? { countTokens } : {}),
-  });
   let runResult = null;
   let runError = null;
   try {
     try {
+      const prompt = await agentPromptBuilder({
+        settings,
+        taskType: "agent_recall",
+        toolSnapshot: registry.capture(),
+        assignment: {
+          turnId,
+          userMessage,
+          recentMessages,
+          historyFingerprint: String(options.historyFingerprint || ""),
+          startWith: "recall_context",
+          settleWith: "recall_publish",
+        },
+        context: {
+          userMessage,
+          recentMessages: recentMessages.join("\n---\n"),
+        },
+        promptBuilder: taskPromptBuilder,
+        stPromptContext,
+      });
+      const runtime = createBmeAgentRuntime({
+        journal,
+        settings,
+        toolRegistry: registry,
+        ...(model ? { model } : {}),
+        ...(countTokens ? { countTokens } : {}),
+      });
       runResult = await runtime.run({
         chatId,
         taskId,
         runId,
         agentKind: "graph-recall-agent",
-        taskType: "memory_recall",
-        messages: buildRecallAgentMessages({
-          turnId,
-          userMessage,
-          recentMessages,
-          historyFingerprint: String(options.historyFingerprint || ""),
-        }),
+        taskType: "agent_recall",
+        messages: prompt.messages,
         metadata: {
           recallKey: String(options.recallKey || ""),
           candidateCount: packet.candidates.length,
+          taskProfileId: prompt.profileId,
+          taskProfileName: prompt.profileName,
+          toolSnapshotFingerprint: prompt.toolSnapshotFingerprint,
         },
         signal,
       });

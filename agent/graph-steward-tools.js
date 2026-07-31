@@ -90,7 +90,7 @@ export class GraphStewardAgentToolset {
       registry.register(
         toolDefinition(
           "memory_task_context",
-          "Read the complete unprocessed conversation batch, graph statistics, and capabilities the user allows for this task.",
+          "第一步使用。返回完整未处理聊天批次、标记为 contextOnly 的理解性前文、图谱/总结/维护统计，以及用户本轮允许的维护能力。只读；返回内容是本次判断的事实边界。",
         ),
         async (_args, scope) => await this.context(scope),
         { readOnly: true, idempotent: true },
@@ -100,7 +100,7 @@ export class GraphStewardAgentToolset {
       registry.register(
         toolDefinition(
           "memory_run_pipeline",
-          "Run BME's existing extraction and persistence pipeline once, with a need-based subset of user-enabled maintenance capabilities.",
+          "本批次的有变更结算工具。始终执行受事务保护的客观/主观提取与持久化，并按需附加整合、总结、反思、压缩、遗忘；请求只能缩小用户已允许的能力，不能开启禁用项。成功或失败后都不能再改用无变更结算。",
           {
             consolidate: { type: "boolean" },
             summarize: { type: "boolean" },
@@ -126,7 +126,7 @@ export class GraphStewardAgentToolset {
       registry.register(
         toolDefinition(
           "memory_complete_without_changes",
-          "Mark this conversation batch processed without creating memory because it contains no durable information.",
+          "本批次的无变更结算工具。仅在新批次没有长期记忆价值且所有已允许维护工作都无需运行时使用；会建立可回退的已处理检查点，不创建记忆。成功或失败后都不能再启动管线。",
           { reason: { type: "string", minLength: 1 } },
           ["reason"],
         ),

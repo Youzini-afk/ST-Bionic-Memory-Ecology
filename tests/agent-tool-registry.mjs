@@ -17,6 +17,9 @@ registry.register(
   { readOnly: true, idempotent: true },
 );
 const firstSnapshot = registry.capture();
+assert.deepEqual(firstSnapshot.catalog.map((entry) => entry.name), ["lookup"]);
+assert.equal(firstSnapshot.catalog[0].readOnly, true);
+assert.equal(firstSnapshot.catalog[0].idempotent, true);
 
 registry.register(
   {

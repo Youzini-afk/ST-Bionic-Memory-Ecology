@@ -223,6 +223,19 @@ export class AgentToolRegistry {
     const definitions = freezeDomainValue(
       [...entries.values()].map((entry) => cloneDomainValue(entry.definition, entry.definition)),
     );
+    const catalog = freezeDomainValue(
+      [...entries.values()].map((entry) => ({
+        name: entry.name,
+        description: entry.definition.function.description,
+        parameters: cloneDomainValue(
+          entry.definition.function.parameters,
+          entry.definition.function.parameters,
+        ),
+        readOnly: entry.readOnly,
+        idempotent: entry.idempotent,
+        parallelSafe: entry.parallelSafe,
+      })),
+    );
     const fingerprint = hashDomainValue(
       [...entries.values()].map((entry) => ({
         definition: entry.definition,
@@ -232,6 +245,7 @@ export class AgentToolRegistry {
     return Object.freeze({
       fingerprint,
       definitions,
+      catalog,
       names: Object.freeze([...entries.keys()]),
       execute: async (toolCall, scope = {}) => {
         const name = String(toolCall?.name || toolCall?.function?.name || "").trim();

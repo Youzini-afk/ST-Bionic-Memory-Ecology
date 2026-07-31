@@ -25,6 +25,8 @@ assert.ok(migrated.taskProfiles);
 assert.ok(migrated.taskProfiles.extract_objective);
 assert.ok(migrated.taskProfiles.recall);
 assert.ok(migrated.taskProfiles.planner);
+assert.ok(migrated.taskProfiles.agent_recall);
+assert.ok(migrated.taskProfiles.agent_steward);
 
 const extractProfile = getActiveTaskProfile(
   {
@@ -162,6 +164,36 @@ assert.deepEqual(
 );
 assert.ok(defaults.summary_rollup.profiles.length > 0);
 assert.ok(defaults.planner.profiles.length > 0);
+assert.deepEqual(
+  defaults.agent_recall.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "agent_recall-default-role",
+    "charDescription",
+    "userPersona",
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "agentToolCatalog",
+    "agentAssignment",
+  ],
+);
+assert.deepEqual(
+  defaults.agent_steward.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "agent_steward-default-role",
+    "charDescription",
+    "userPersona",
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "agentToolCatalog",
+    "agentAssignment",
+  ],
+);
+assert.notEqual(
+  defaults.agent_recall.profiles[0].blocks[0].content,
+  defaults.recall.profiles[0].blocks.find((block) => block.id === "default-role")?.content,
+);
+assert.match(defaults.agent_recall.profiles[0].blocks[0].content, /独立的任务、策略和提示词/);
+assert.match(defaults.agent_steward.profiles[0].blocks[0].content, /不读取也不执行任何 Workflow 任务预设/);
 assert.deepEqual(
   defaults.planner.profiles[0].blocks.map((block) => block.sourceKey || block.id),
   [

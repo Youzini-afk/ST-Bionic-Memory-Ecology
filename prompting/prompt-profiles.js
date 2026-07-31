@@ -10,16 +10,19 @@ import {
   PLANNER_ASSISTANT_SEED,
 } from "../ena-planner/ena-planner-presets.js";
 import { DEFAULT_TASK_PROFILE_TEMPLATES } from "./default-task-profile-templates.js";
+import { DEFAULT_AGENT_TASK_PROFILE_TEMPLATES } from "./default-agent-task-profile-templates.js";
 
 const TASK_TYPES = [
   "extract_objective",
   "extract_subjective",
   "recall",
+  "agent_recall",
   "compress",
   "synopsis",
   "summary_rollup",
   "reflection",
   "consolidation",
+  "agent_steward",
   "planner",
 ];
 
@@ -35,6 +38,10 @@ const TASK_TYPE_META = {
   recall: {
     label: "召回",
     description: "根据上下文筛选最相关的记忆节点。",
+  },
+  agent_recall: {
+    label: "Agent 召回",
+    description: "独立配置召回 Agent 的调查策略、工具使用与注入计划。",
   },
   compress: {
     label: "压缩",
@@ -55,6 +62,10 @@ const TASK_TYPE_META = {
   consolidation: {
     label: "整合",
     description: "分析新旧记忆的冲突、去重与进化。",
+  },
+  agent_steward: {
+    label: "Agent 记忆管家",
+    description: "独立配置后台 Agent 对提取与维护任务的判断和调度。",
   },
   planner: {
     label: "规划",
@@ -230,6 +241,20 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     role: "system",
     description: "注入未来主观提取链路中 owner 的认知状态摘要。仅供拆分提取预设显式添加时使用。",
     taskTypes: ["extract_objective", "extract_subjective"],
+  },
+  {
+    sourceKey: "agentToolCatalog",
+    name: "Agent 工具目录",
+    role: "system",
+    description: "注入本次运行真实注册的工具、用途、参数 Schema 与只读/结算性质。目录随代码中的实际工具动态生成，不与 Workflow 工具或静态文案共用。",
+    taskTypes: ["agent_recall", "agent_steward"],
+  },
+  {
+    sourceKey: "agentAssignment",
+    name: "Agent 当前任务",
+    role: "user",
+    description: "注入本次 Agent 任务的聊天标识、楼层范围、当前输入和运行边界。任务状态的完整数据仍应通过对应上下文工具读取。",
+    taskTypes: ["agent_recall", "agent_steward"],
   },
   {
     sourceKey: "plannerCharacterCard",
@@ -802,7 +827,9 @@ function getDefaultTaskProfileTemplate(taskType) {
     return buildPlannerDefaultTaskProfileTemplate();
   }
   const templateKey = String(taskType || "");
-  const template = DEFAULT_TASK_PROFILE_TEMPLATES?.[templateKey];
+  const template =
+    DEFAULT_AGENT_TASK_PROFILE_TEMPLATES?.[templateKey] ||
+    DEFAULT_TASK_PROFILE_TEMPLATES?.[templateKey];
   if (!template || typeof template !== "object") {
     return null;
   }

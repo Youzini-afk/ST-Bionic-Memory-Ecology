@@ -20,6 +20,7 @@ const PRODUCT_CONTRACT_TESTS = [
   "event-binding-priority.mjs",
   "extraction-external-abort.mjs",
   "graph-agent-retriever.mjs",
+  "recall-injection-plan.mjs",
   "graph-steward-agent.mjs",
   "identity-resolver.mjs",
   "indexeddb-sync.mjs",

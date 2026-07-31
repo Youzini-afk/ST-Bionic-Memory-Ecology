@@ -120,6 +120,8 @@ assert.equal(getTaskTypes().includes("extract"), false);
 
 assert.ok(getTaskTypes().includes("extract_objective"));
 assert.ok(getTaskTypes().includes("extract_subjective"));
+assert.ok(getTaskTypes().includes("agent_recall"));
+assert.ok(getTaskTypes().includes("agent_steward"));
 assert.equal(
   getTaskTypeOptions().some((option) => option.id === "extract_objective"),
   true,
@@ -150,6 +152,8 @@ assert.deepEqual(
 );
 assert.ok(taskProfiles.extract_objective?.profiles?.length > 0);
 assert.ok(taskProfiles.extract_subjective?.profiles?.length > 0);
+assert.ok(taskProfiles.agent_recall?.profiles?.length > 0);
+assert.ok(taskProfiles.agent_steward?.profiles?.length > 0);
 assert.equal(
   taskProfiles.extract_objective.profiles[0].metadata.legacyPromptField,
   "extractObjectivePrompt",
@@ -181,6 +185,18 @@ assert.deepEqual(
     "relevantPovMemories",
     "cognitionStateDigest",
   ],
+);
+assert.deepEqual(
+  getBuiltinBlockDefinitions("agent_recall")
+    .map((definition) => definition.sourceKey)
+    .filter((sourceKey) => ["agentToolCatalog", "agentAssignment"].includes(sourceKey)),
+  ["agentToolCatalog", "agentAssignment"],
+);
+assert.equal(
+  getBuiltinBlockDefinitions("recall").some(
+    (definition) => definition.sourceKey === "agentToolCatalog",
+  ),
+  false,
 );
 
 console.log("task-profile-storage tests passed");
