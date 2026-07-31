@@ -39,6 +39,7 @@ import {
   getBuiltinBlockDefinitions,
   getLegacyPromptFieldForTask,
   getTaskTypeOptions,
+  getTaskTypeOptionsForRuntimeMode,
   importTaskProfile as parseImportedTaskProfile,
   isTaskRegexStageEnabled,
   migrateLegacyProfileRegexToGlobal,
@@ -8231,7 +8232,13 @@ function _bindConfigControls() {
   });
 
   bindRuntimeModeControls({
-    patchSettings: _patchSettings,
+    patchSettings: (patch) =>
+      _patchSettings(patch, {
+        refreshTaskWorkspace: Object.prototype.hasOwnProperty.call(
+          patch || {},
+          "memoryRuntimeMode",
+        ),
+      }),
     bindNumber,
     panel: panelEl,
     translate: t,
@@ -9615,7 +9622,10 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   const globalRegexRules = Array.isArray(globalTaskRegex.localRules)
     ? globalTaskRegex.localRules
     : [];
-  const taskTypeOptions = getTaskTypeOptions();
+  const allTaskTypeOptions = getTaskTypeOptions();
+  const taskTypeOptions = getTaskTypeOptionsForRuntimeMode(
+    settings.memoryRuntimeMode,
+  );
   const runtimeDebug = _getRuntimeDebugSnapshot?.() || {
     hostCapabilities: null,
     runtimeDebug: null,
@@ -9660,6 +9670,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     globalTaskRegex,
     globalRegexRules,
     showGlobalRegex: showGlobalRegexPanel,
+    allTaskTypeOptions,
     taskTypeOptions,
     taskType: currentTaskProfileTaskType,
     taskTabId: currentTaskProfileTabId,
@@ -11002,7 +11013,9 @@ function _renderTaskProfileWorkspace(state) {
     state.taskTypeOptions.find((item) => item.id === state.taskType) ||
     state.taskTypeOptions[0];
   const profileUpdatedAt = _formatTaskProfileTime(state.profile.updatedAt);
-  const totalTaskTypes = Array.isArray(state.taskTypeOptions) ? state.taskTypeOptions.length : 0;
+  const totalTaskTypes = Array.isArray(state.allTaskTypeOptions)
+    ? state.allTaskTypeOptions.length
+    : 0;
 
   return `
     <div class="bme-task-shell">

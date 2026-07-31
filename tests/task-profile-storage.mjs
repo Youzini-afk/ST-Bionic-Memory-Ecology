@@ -12,6 +12,7 @@ import {
   getLegacyPromptFieldForTask,
   getTaskTypeMeta,
   getTaskTypeOptions,
+  getTaskTypeOptionsForRuntimeMode,
   getTaskTypes,
   importTaskProfile,
   restoreDefaultTaskProfile,
@@ -122,6 +123,24 @@ assert.ok(getTaskTypes().includes("extract_objective"));
 assert.ok(getTaskTypes().includes("extract_subjective"));
 assert.ok(getTaskTypes().includes("agent_recall"));
 assert.ok(getTaskTypes().includes("agent_steward"));
+assert.deepEqual(
+  getTaskTypeOptionsForRuntimeMode("agent").map((option) => option.id),
+  ["agent_recall", "agent_steward", "planner"],
+);
+assert.deepEqual(
+  getTaskTypeOptionsForRuntimeMode("workflow").map((option) => option.id),
+  [
+    "extract_objective",
+    "extract_subjective",
+    "recall",
+    "compress",
+    "synopsis",
+    "summary_rollup",
+    "reflection",
+    "consolidation",
+    "planner",
+  ],
+);
 assert.equal(
   getTaskTypeOptions().some((option) => option.id === "extract_objective"),
   true,

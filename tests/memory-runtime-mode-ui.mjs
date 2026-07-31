@@ -14,6 +14,14 @@ assert.match(html, /data-memory-runtime-mode="agent"/);
 assert.match(html, /class="bme-agent-cadence-note"/);
 assert.match(panel, /bindRuntimeModeControls/);
 assert.match(panel, /refreshRuntimeModeControls/);
+assert.match(
+  panel,
+  /getTaskTypeOptionsForRuntimeMode\(\s*settings\.memoryRuntimeMode,?\s*\)/,
+);
+assert.match(
+  panel,
+  /refreshTaskWorkspace:[\s\S]{0,180}"memoryRuntimeMode"/,
+);
 assert.match(controls, /memoryRuntimeMode:\s*normalizeMemoryRuntimeMode/);
 assert.match(controls, /patchSettings\(buildPatch\(button\)\)/);
 assert.match(css, /\.bme-runtime-mode-switch/);

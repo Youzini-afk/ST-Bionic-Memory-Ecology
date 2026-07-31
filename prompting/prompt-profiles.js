@@ -26,6 +26,9 @@ const TASK_TYPES = [
   "planner",
 ];
 
+const AGENT_TASK_TYPES = new Set(["agent_recall", "agent_steward"]);
+const SHARED_RUNTIME_TASK_TYPES = new Set(["planner"]);
+
 const TASK_TYPE_META = {
   extract_objective: {
     label: "客观提取",
@@ -2110,6 +2113,14 @@ export function getTaskTypeOptions() {
   return TASK_TYPES
     .map((taskType) => getTaskTypeMeta(taskType))
     .filter((meta) => meta.hidden !== true);
+}
+
+export function getTaskTypeOptionsForRuntimeMode(runtimeMode = "workflow") {
+  const agentMode = String(runtimeMode || "").trim().toLowerCase() === "agent";
+  return getTaskTypeOptions().filter((meta) => {
+    if (SHARED_RUNTIME_TASK_TYPES.has(meta.id)) return true;
+    return AGENT_TASK_TYPES.has(meta.id) === agentMode;
+  });
 }
 
 export function getTaskTypes() {
