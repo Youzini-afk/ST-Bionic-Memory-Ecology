@@ -27,6 +27,14 @@ publishes it in one domain transaction. Extraction, consolidation, evolution,
 summary, reflection, and compression are capabilities of this one open tool
 loop, not independent mandatory LLM stages.
 
+The Steward claims every currently runnable inbox item for a chat as one atomic
+assignment. It may search lexically and semantically, inspect exact revisions,
+relations, and evidence, and then either publish one complete change set or
+record an explicit no-change outcome. New semantic state invalidates an old
+plan; Agent journal and inbox-only commits may be rebased because they do not
+change the materialized memory view. Deferred work stays durable and is retried
+by a later wake rather than by an unbounded foreground retry loop.
+
 The foreground Recall Agent receives a programmatic multi-channel candidate
 packet. It may publish immediately or query deeper through the same read tools.
 It writes exactly one turn-scoped Recall Artifact. ENA remains opt-in and uses
@@ -54,6 +62,15 @@ and the ledger parent commit. Unrelated projection writes may advance the
 physical revision and be retried; a changed ledger head is a semantic conflict.
 This avoids rewriting the complete ledger on every turn and lets IndexedDB,
 OPFS, and the Authority module share the same atomic boundary.
+
+The compatibility graph projection uses stable `memoryId` and `relationId`
+identities. Sequence ranges and persistence repair floors are derived from the
+supporting turn evidence, while revision and evidence provenance remain on the
+projected records. Timeline segments are deterministic, synopsis revisions
+materialize summary entries, and POV revisions materialize cognition ownership.
+An unchanged revision keeps runtime access statistics and embeddings; a changed
+or retracted revision invalidates its vector mapping. The projection can be
+rebuilt without becoming a second source of truth.
 
 History reconciliation compares the complete current set of assistant-turn
 evidence with the ledger. Mutable SillyTavern array indexes remain locators

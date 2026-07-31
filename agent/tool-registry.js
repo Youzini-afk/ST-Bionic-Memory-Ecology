@@ -273,6 +273,11 @@ export class AgentToolRegistry {
           if (isAbortLikeError(error) || scope.signal?.aborted) throw error;
           return failureResult("tool_error", error?.message || String(error), {
             name: error?.name || "Error",
+            code: String(error?.code || ""),
+            details:
+              error?.details && typeof error.details === "object"
+                ? cloneDomainValue(error.details, {})
+                : {},
           });
         }
       },

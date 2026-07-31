@@ -8,7 +8,10 @@ import {
   hashDomainValue,
   normalizeStringArray,
 } from "../domain/memory-id.js";
-import { buildMemoryLedgerIndex } from "../domain/memory-ledger.js";
+import {
+  buildMemoryLedgerIndex,
+  createMemoryLedgerReplayTransaction,
+} from "../domain/memory-ledger.js";
 import { materializeAgentRuns } from "../domain/memory-materializer.js";
 import { createAgentEvent } from "../domain/memory-records.js";
 import { BmeAgentError } from "./errors.js";
@@ -63,28 +66,6 @@ function interruptionReason(latestEvent) {
   }
 }
 
-function replayTransaction(ledger, commit) {
-  const index = buildMemoryLedgerIndex(ledger);
-  const records = commit.appendedRecordIds
-    .map((recordId) => index.recordsById.get(recordId))
-    .filter(Boolean)
-    .map((record) => {
-      const cloned = cloneDomainValue(record, record);
-      delete cloned.ledgerRevision;
-      delete cloned.ledgerOrdinal;
-      return cloned;
-    });
-  return {
-    baseRevision: commit.baseRevision,
-    idempotencyKey: commit.idempotencyKey,
-    records,
-    readRecordIds: commit.readRecordIds,
-    sourceEvidenceIds: commit.sourceEvidenceIds,
-    reason: commit.reason,
-    now: commit.createdAt,
-  };
-}
-
 export class DurableAgentJournal {
   constructor({ repository, now = () => Date.now() } = {}) {
     if (!repository || typeof repository.load !== "function" || typeof repository.transact !== "function") {
@@ -122,7 +103,7 @@ export class DurableAgentJournal {
           appendedEvent = ledger.records.find(
             (record) => replayCommit.appendedRecordIds.includes(record.id),
           );
-          return replayTransaction(ledger, replayCommit);
+          return createMemoryLedgerReplayTransaction(ledger, replayCommit);
         }
         throw new BmeAgentRunExistsError(runId);
       }
@@ -204,7 +185,7 @@ export class DurableAgentJournal {
             details: { operationKey, existingEventId: appendedEvent?.id || "" },
           });
         }
-        return replayTransaction(ledger, replayCommit);
+        return createMemoryLedgerReplayTransaction(ledger, replayCommit);
       }
       const run = materializeAgentRuns(ledger).runs.get(runId);
       if (!run) throw new BmeAgentError(`BME Agent run not found: ${runId}`, {
@@ -258,9 +239,11 @@ export class DurableAgentJournal {
     };
   }
 
-  async recoverInterruptedRuns(chatId, { reason = "" } = {}) {
+  async recoverInterruptedRuns(chatId, { reason = "", agentKind = "" } = {}) {
     const ledger = await this.repository.load(chatId, { fresh: true });
-    const active = materializeAgentRuns(ledger).active;
+    const active = materializeAgentRuns(ledger).active.filter(
+      (run) => !agentKind || run.agentKind === agentKind,
+    );
     const recovered = [];
     for (const run of active) {
       const resolvedReason = reason || interruptionReason(run.latestEvent);

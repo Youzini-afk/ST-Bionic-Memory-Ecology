@@ -7,9 +7,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const allowedImports = Object.freeze({
   domain: new Set(["domain"]),
-  application: new Set(["application", "domain", "agent", "storage"]),
+  application: new Set(["application", "domain", "agent", "storage", "projection"]),
   agent: new Set(["agent", "domain"]),
   storage: new Set(["storage", "domain"]),
+  projection: new Set(["projection", "domain", "graph", "runtime"]),
 });
 
 async function collect(directory) {
@@ -53,4 +54,3 @@ for (const [layer, allowed] of Object.entries(allowedImports)) {
 }
 
 console.log("vNext architecture contract tests passed");
-

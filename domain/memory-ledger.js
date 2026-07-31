@@ -146,6 +146,38 @@ export function buildMemoryLedgerIndex(ledger) {
   };
 }
 
+export function createMemoryLedgerReplayTransaction(ledger, commitOrIdempotencyKey) {
+  const index = buildMemoryLedgerIndex(ledger);
+  const commit =
+    typeof commitOrIdempotencyKey === "string"
+      ? index.commitsByIdempotencyKey.get(commitOrIdempotencyKey)
+      : commitOrIdempotencyKey;
+  if (!commit || commit.kind !== MEMORY_RECORD_KIND.COMMIT) {
+    throw new MemoryLedgerValidationError("memory ledger replay commit was not found");
+  }
+  const records = commit.appendedRecordIds.map((recordId) => {
+    const stored = index.recordsById.get(recordId);
+    if (!stored || stored.kind === MEMORY_RECORD_KIND.COMMIT) {
+      throw new MemoryLedgerValidationError("memory ledger replay record was not found", [
+        `missing replay record: ${recordId}`,
+      ]);
+    }
+    const cloned = cloneDomainValue(stored, stored);
+    delete cloned.ledgerRevision;
+    delete cloned.ledgerOrdinal;
+    return cloned;
+  });
+  return {
+    baseRevision: commit.baseRevision,
+    idempotencyKey: commit.idempotencyKey,
+    records,
+    readRecordIds: commit.readRecordIds,
+    sourceEvidenceIds: commit.sourceEvidenceIds,
+    reason: commit.reason,
+    now: commit.createdAt,
+  };
+}
+
 function validateRecordShape(record, ledger, index, appendedById) {
   const issues = [];
   const id = String(record?.id || "").trim();

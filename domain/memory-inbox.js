@@ -96,7 +96,7 @@ export function admitTurnEvidence(
   };
 }
 
-export function transitionInboxItem(
+export function planInboxTransition(
   ledger,
   {
     inboxId,
@@ -121,6 +121,12 @@ export function transitionInboxItem(
   const targetStatus = String(status || "");
   if (!ALLOWED_TRANSITIONS[current.status]?.has(targetStatus)) {
     throw new Error(`invalid inbox transition: ${current.status} -> ${targetStatus}`);
+  }
+  if (
+    targetStatus === MEMORY_INBOX_STATUS.CLAIMED &&
+    Number(current.availableAt || 0) > Number(now)
+  ) {
+    throw new Error(`inbox item is not available: ${normalizedInboxId}`);
   }
   const next = createInboxItemRevision({
     ...current,
@@ -148,7 +154,7 @@ export function transitionInboxItem(
     payload: payload === undefined ? current.payload : payload,
     createdAt: now,
   });
-  const result = appendMemoryLedgerTransaction(ledger, {
+  const transaction = {
     baseRevision: ledger.revision,
     idempotencyKey:
       idempotencyKey ||
@@ -158,10 +164,123 @@ export function transitionInboxItem(
     sourceEvidenceIds: current.sourceRecordIds,
     reason: `inbox-${targetStatus}`,
     now,
-  });
+  };
+  return { current, inboxItem: next, transaction };
+}
+
+export function transitionInboxItem(ledger, input = {}) {
+  const planned = planInboxTransition(ledger, input);
+  const result = appendMemoryLedgerTransaction(ledger, planned.transaction);
   return {
     ...result,
-    inboxItem: result.appendedRecords[0],
+    inboxItem:
+      result.appendedRecords.find((record) => record.id === planned.inboxItem.id) ||
+      planned.inboxItem,
+  };
+}
+
+export function planInboxBatchTransition(
+  ledger,
+  {
+    inboxIds = [],
+    expectedRevisionIds = [],
+    status,
+    expectedStatus = "",
+    claimId = "",
+    claimOwner = "",
+    availableAt = undefined,
+    note = "",
+    payloadPatch = null,
+    idempotencyKey = "",
+    now = Date.now(),
+  } = {},
+) {
+  const normalizedInboxIds = [
+    ...new Set((inboxIds || []).map((value) => String(value || "").trim()).filter(Boolean)),
+  ];
+  if (normalizedInboxIds.length === 0) {
+    throw new TypeError("inbox batch transition requires inboxIds");
+  }
+  const state = materializeInboxState(ledger);
+  const targetStatus = String(status || "");
+  const expectedRevisionByInboxId = new Map(
+    normalizedInboxIds.map((inboxId, index) => [
+      inboxId,
+      String(expectedRevisionIds?.[index] || "").trim(),
+    ]),
+  );
+  const currentItems = normalizedInboxIds.map((inboxId) => {
+    const current = state.latestByInboxId.get(inboxId);
+    if (!current) throw new Error(`inbox item not found: ${inboxId}`);
+    const expectedRevisionId = expectedRevisionByInboxId.get(inboxId);
+    if (expectedRevisionId && current.id !== expectedRevisionId) {
+      throw new Error(`inbox revision changed: ${inboxId}`);
+    }
+    if (expectedStatus && current.status !== expectedStatus) {
+      throw new Error(`inbox status changed: ${current.status}`);
+    }
+    if (!ALLOWED_TRANSITIONS[current.status]?.has(targetStatus)) {
+      throw new Error(`invalid inbox transition: ${current.status} -> ${targetStatus}`);
+    }
+    if (
+      targetStatus === MEMORY_INBOX_STATUS.CLAIMED &&
+      Number(current.availableAt || 0) > Number(now)
+    ) {
+      throw new Error(`inbox item is not available: ${inboxId}`);
+    }
+    return current;
+  });
+  const patch = payloadPatch && typeof payloadPatch === "object" ? payloadPatch : null;
+  const nextItems = currentItems.map((current) =>
+    createInboxItemRevision({
+      ...current,
+      id: undefined,
+      status: targetStatus,
+      sequence: Number(current.sequence) + 1,
+      previousRevisionId: current.id,
+      attempt:
+        targetStatus === MEMORY_INBOX_STATUS.CLAIMED
+          ? Number(current.attempt || 0) + 1
+          : Number(current.attempt || 0),
+      claimId:
+        targetStatus === MEMORY_INBOX_STATUS.CLAIMED
+          ? requireDomainId(claimId, "claimId")
+          : claimId || current.claimId,
+      claimOwner:
+        targetStatus === MEMORY_INBOX_STATUS.CLAIMED
+          ? requireDomainId(claimOwner, "claimOwner")
+          : claimOwner || current.claimOwner,
+      availableAt:
+        targetStatus === MEMORY_INBOX_STATUS.DEFERRED
+          ? normalizeTimestamp(availableAt, now)
+          : current.availableAt,
+      note,
+      payload: patch ? { ...current.payload, ...patch } : current.payload,
+      createdAt: now,
+    }),
+  );
+  const resolvedIdempotencyKey =
+    idempotencyKey ||
+    `inbox-batch:${hashDomainValue({
+      chatId: ledger.chatId,
+      inboxIds: normalizedInboxIds,
+      targetStatus,
+      previousRevisionIds: currentItems.map((item) => item.id),
+    })}`;
+  return {
+    currentItems,
+    inboxItems: nextItems,
+    transaction: {
+      baseRevision: ledger.revision,
+      idempotencyKey: resolvedIdempotencyKey,
+      records: nextItems,
+      readRecordIds: currentItems.map((item) => item.id),
+      sourceEvidenceIds: [
+        ...new Set(currentItems.flatMap((item) => item.sourceRecordIds || [])),
+      ],
+      reason: `inbox-batch-${targetStatus}`,
+      now,
+    },
   };
 }
 
