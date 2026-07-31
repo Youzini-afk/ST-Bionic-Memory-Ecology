@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [html, panel, css, index] = await Promise.all([
+const [html, panel, controls, css, index] = await Promise.all([
   readFile(new URL("../ui/panel.html", import.meta.url), "utf8"),
   readFile(new URL("../ui/panel.js", import.meta.url), "utf8"),
+  readFile(new URL("../ui/runtime-mode-controls.js", import.meta.url), "utf8"),
   readFile(new URL("../style.css", import.meta.url), "utf8"),
   readFile(new URL("../index.js", import.meta.url), "utf8"),
 ]);
@@ -12,8 +13,10 @@ assert.match(html, /id="bme-memory-runtime-mode"/);
 assert.match(html, /data-memory-runtime-mode="workflow"/);
 assert.match(html, /data-memory-runtime-mode="agent"/);
 assert.match(html, /class="bme-agent-cadence-note"/);
-assert.match(panel, /_patchSettings\(\{ memoryRuntimeMode \}\)/);
-assert.match(panel, /normalizeMemoryRuntimeMode/);
+assert.match(panel, /bindRuntimeModeControls/);
+assert.match(panel, /refreshRuntimeModeControls/);
+assert.match(controls, /memoryRuntimeMode:\s*normalizeMemoryRuntimeMode/);
+assert.match(controls, /patchSettings\(buildPatch\(button\)\)/);
 assert.match(css, /\.bme-runtime-mode-switch/);
 assert.match(
   css,
@@ -44,7 +47,7 @@ for (const agentControl of [
   "bme-setting-agent-max-run-minutes",
 ]) {
   assert.match(html, new RegExp(`id="${agentControl}"`));
-  assert.match(panel, new RegExp(agentControl));
+  assert.match(controls, new RegExp(agentControl));
 }
 
 assert.doesNotMatch(

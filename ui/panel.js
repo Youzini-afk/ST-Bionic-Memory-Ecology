@@ -55,13 +55,9 @@ import {
 } from "../vector/vector-index.js";
 import { buildAuthorityConsistencyRepairPlan } from "../maintenance/authority-consistency.js";
 import {
-  getMaintenanceExecutionModeLevel,
-  normalizeMaintenanceExecutionMode,
-} from "../runtime/concurrency.js";
-import {
-  MEMORY_RUNTIME_MODE,
-  normalizeMemoryRuntimeMode,
-} from "../runtime/memory-runtime-mode.js";
+  bindRuntimeModeControls,
+  refreshRuntimeModeControls,
+} from "./runtime-mode-controls.js";
 import {
   formatI18nValue,
   formatUiStatusMeta,
@@ -4818,80 +4814,6 @@ function _getSelectedGraphNode(graph = _getGraph?.()) {
   return graph.nodes.find((node) => String(node?.id || "") === nodeId) || null;
 }
 
-function _getMaintenanceExecutionModeUiMeta(modeValue = "strict") {
-  const mode = normalizeMaintenanceExecutionMode(modeValue);
-  switch (mode) {
-    case "balanced":
-      return {
-        mode,
-        title: "2 均衡加速",
-        desc: "2 均衡加速：提取主链同步，只读查询限流并发，维护任务逐步后台化。",
-      };
-    case "fast":
-      return {
-        mode,
-        title: "3 快速后台",
-        desc: "3 快速后台：核心写入优先完成，其余维护后台最终一致。",
-      };
-    case "strict":
-    default:
-      return {
-        mode: "strict",
-        title: "1 严格串行",
-        desc: "1 严格串行：全部同步执行，稳定优先。",
-      };
-  }
-}
-
-function _refreshMaintenanceExecutionModeUi(settings = _getSettings?.() || {}) {
-  const meta = _getMaintenanceExecutionModeUiMeta(
-    settings.maintenanceExecutionMode || "strict",
-  );
-  const segmented = document.getElementById("bme-setting-maintenance-execution-mode");
-  const desc = document.getElementById("bme-maintenance-mode-desc");
-  const card = document.getElementById("bme-maintenance-mode-card");
-  const level = getMaintenanceExecutionModeLevel(meta.mode);
-  if (desc) desc.textContent = meta.desc;
-  if (segmented) segmented.dataset.mode = meta.mode;
-  if (card) {
-    card.dataset.mode = meta.mode;
-    card.title = `${meta.title}；1 严格串行 / 2 均衡加速 / 3 快速后台（最终一致）`;
-  }
-  segmented?.querySelectorAll("button[data-mode]").forEach((button) => {
-    const active =
-      normalizeMaintenanceExecutionMode(button.dataset.mode) === meta.mode;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-    button.title = active ? `${level} · ${meta.title}` : button.getAttribute("aria-label") || "";
-  });
-}
-
-function _refreshMemoryRuntimeModeUi(settings = _getSettings?.() || {}) {
-  const mode = normalizeMemoryRuntimeMode(settings.memoryRuntimeMode);
-  const switchEl = document.getElementById("bme-memory-runtime-mode");
-  switchEl
-    ?.querySelectorAll("button[data-memory-runtime-mode]")
-    .forEach((button) => {
-      const active =
-        normalizeMemoryRuntimeMode(button.dataset.memoryRuntimeMode) === mode;
-      button.classList.toggle("is-active", active);
-      button.setAttribute("aria-pressed", String(active));
-    });
-  const hint = document.getElementById("bme-memory-runtime-mode-hint");
-  if (hint) {
-    const key =
-      mode === MEMORY_RUNTIME_MODE.AGENT
-        ? "panel.runtimeMode.agentHint"
-        : "panel.runtimeMode.workflowHint";
-    hint.dataset.i18n = key;
-    hint.textContent = t(key);
-  }
-  document
-    .getElementById("bme-agent-runtime-settings")
-    ?.classList.toggle("is-active-mode", mode === MEMORY_RUNTIME_MODE.AGENT);
-  if (panelEl) panelEl.dataset.memoryRuntimeMode = mode;
-}
-
 function _getCognitionOwnerCollection(graph) {
   return typeof listKnowledgeOwners === "function" ? listKnowledgeOwners(graph) : [];
 }
@@ -7818,7 +7740,7 @@ function _refreshConfigTab() {
   const settings = _resolveAndPersistActiveLlmPreset(_getSettings?.() || {});
   const resolvedActiveLlmPreset = String(settings.llmActivePreset || "");
   _refreshPlannerLauncher();
-  _refreshMemoryRuntimeModeUi(settings);
+  refreshRuntimeModeControls({ settings, panel: panelEl, translate: t });
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
@@ -7861,7 +7783,6 @@ function _refreshConfigTab() {
     "bme-setting-extract-auto-enabled",
     settings.extractAutoEnabled ?? true,
   );
-  _refreshMaintenanceExecutionModeUi(settings);
   _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
   _setCheckboxValue(
     "bme-setting-recall-vector-prefilter-enabled",
@@ -8237,19 +8158,6 @@ function _refreshConfigTab() {
   _populateLlmPresetSelect(settings.llmPresets || {}, resolvedActiveLlmPreset);
   _syncLlmPresetControls(resolvedActiveLlmPreset);
   _setInputValue("bme-setting-timeout-ms", settings.timeoutMs ?? 300000);
-  _setInputValue(
-    "bme-setting-agent-context-window",
-    settings.agentContextWindowTokens ?? 128000,
-  );
-  _setInputValue(
-    "bme-setting-agent-max-tool-calls",
-    settings.agentMaxToolCalls ?? 500,
-  );
-  _setInputValue(
-    "bme-setting-agent-max-run-minutes",
-    Math.max(1, Math.round(Number(settings.agentMaxRunMs ?? 480000) / 60000)),
-  );
-
   _setInputValue("bme-setting-embed-url", settings.embeddingApiUrl || "");
   _setInputValue("bme-setting-embed-key", settings.embeddingApiKey || "");
   _setInputValue(
@@ -8322,19 +8230,12 @@ function _bindConfigControls() {
     btn.dataset.bmeBound = "true";
   });
 
-  const runtimeModeEl = document.getElementById("bme-memory-runtime-mode");
-  if (runtimeModeEl && runtimeModeEl.dataset.bmeBound !== "true") {
-    runtimeModeEl.addEventListener("click", (event) => {
-      const button = event.target?.closest?.("button[data-memory-runtime-mode]");
-      if (!button) return;
-      const memoryRuntimeMode = normalizeMemoryRuntimeMode(
-        button.dataset.memoryRuntimeMode,
-      );
-      const settings = _patchSettings({ memoryRuntimeMode });
-      _refreshMemoryRuntimeModeUi(settings);
-    });
-    runtimeModeEl.dataset.bmeBound = "true";
-  }
+  bindRuntimeModeControls({
+    patchSettings: _patchSettings,
+    bindNumber,
+    panel: panelEl,
+    translate: t,
+  });
 
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
@@ -8384,19 +8285,6 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-extract-auto-enabled", (checked) => {
     _patchSettings({ extractAutoEnabled: checked });
   });
-  const maintenanceModeEl = document.getElementById(
-    "bme-setting-maintenance-execution-mode",
-  );
-  if (maintenanceModeEl && maintenanceModeEl.dataset.bmeBound !== "true") {
-    maintenanceModeEl.addEventListener("click", (event) => {
-      const button = event.target?.closest?.("button[data-mode]");
-      if (!button) return;
-      const mode = normalizeMaintenanceExecutionMode(button.dataset.mode);
-      const settings = _patchSettings({ maintenanceExecutionMode: mode });
-      _refreshMaintenanceExecutionModeUi(settings);
-    });
-    maintenanceModeEl.dataset.bmeBound = "true";
-  }
   bindCheckbox("bme-setting-recall-llm", (checked) => {
     _patchSettings({ recallEnableLLM: checked });
     _refreshGuardedConfigStates();
@@ -9015,28 +8903,6 @@ function _bindConfigControls() {
   bindNumber("bme-setting-timeout-ms", 300000, 1000, 3600000, (value) =>
     _patchSettings({ timeoutMs: value }),
   );
-  bindNumber(
-    "bme-setting-agent-context-window",
-    128000,
-    1,
-    Number.MAX_SAFE_INTEGER,
-    (value) => _patchSettings({ agentContextWindowTokens: value }),
-  );
-  bindNumber(
-    "bme-setting-agent-max-tool-calls",
-    500,
-    1,
-    Number.MAX_SAFE_INTEGER,
-    (value) => _patchSettings({ agentMaxToolCalls: value }),
-  );
-  bindNumber(
-    "bme-setting-agent-max-run-minutes",
-    8,
-    1,
-    Math.floor(Number.MAX_SAFE_INTEGER / 60000),
-    (value) => _patchSettings({ agentMaxRunMs: value * 60000 }),
-  );
-
   bindText("bme-setting-embed-url", (value) =>
     _patchSettings({ embeddingApiUrl: value.trim() }),
   );
@@ -14509,9 +14375,6 @@ function _patchSettings(patch = {}, options = {}) {
   }
   _refreshCloudStorageModeUi(settings);
   _refreshNativeRolloutStatusUi(settings);
-  if (Object.prototype.hasOwnProperty.call(patch || {}, "memoryRuntimeMode")) {
-    _refreshMemoryRuntimeModeUi(settings);
-  }
   return settings;
 }
 
