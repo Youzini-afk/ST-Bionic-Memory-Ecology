@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  AGENT_EVENT_TYPE,
   DEFAULT_BME_AGENT_GUARD,
   MEMORY_DOMAIN_DIRECTORIES,
   MEMORY_INBOX_KIND,
@@ -7,6 +8,7 @@ import {
   MEMORY_RECORD_KIND,
   TURN_ARTIFACT_KIND,
   createEmptyMemoryLedger,
+  isAgentEventTransitionAllowed,
 } from "../domain/memory-contract.js";
 import {
   branchConversation,
@@ -32,6 +34,21 @@ assert.deepEqual(DEFAULT_BME_AGENT_GUARD, {
 assert.equal(MEMORY_LAYER.OBJECTIVE, "objective");
 assert.equal(MEMORY_LAYER.POV, "pov");
 assert.equal(MEMORY_RECORD_KIND.EVIDENCE, "evidence");
+assert.equal(MEMORY_RECORD_KIND.AGENT_EVENT, "agent_event");
+assert.equal(
+  isAgentEventTransitionAllowed(
+    AGENT_EVENT_TYPE.MODEL_REQUESTED,
+    AGENT_EVENT_TYPE.ASSISTANT_MESSAGE,
+  ),
+  true,
+);
+assert.equal(
+  isAgentEventTransitionAllowed(
+    AGENT_EVENT_TYPE.RUN_STARTED,
+    AGENT_EVENT_TYPE.RUN_COMPLETED,
+  ),
+  false,
+);
 assert.equal(MEMORY_INBOX_KIND.HISTORY_INVALIDATED, "history_invalidated");
 assert.equal(TURN_ARTIFACT_KIND.RECALL, "recall");
 assert.equal(TURN_ARTIFACT_KIND.PLANNER, "planner");
@@ -83,4 +100,3 @@ assert.equal(source.chat[1].mes, "第一层回复");
 assert.notEqual(0, 1);
 
 console.log("vNext product invariant tests passed");
-

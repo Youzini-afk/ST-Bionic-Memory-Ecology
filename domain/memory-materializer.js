@@ -1,7 +1,9 @@
 import {
+  AGENT_EVENT_TYPE,
   MEMORY_INBOX_STATUS,
   MEMORY_RECORD_KIND,
   MEMORY_REVISION_STATUS,
+  isTerminalAgentEventType,
 } from "./memory-contract.js";
 import { buildMemoryLedgerIndex } from "./memory-ledger.js";
 
@@ -137,6 +139,61 @@ export function materializeInboxState(ledger) {
   };
 }
 
+function agentRunStatus(eventType = "") {
+  switch (eventType) {
+    case AGENT_EVENT_TYPE.RUN_COMPLETED:
+      return "completed";
+    case AGENT_EVENT_TYPE.RUN_SUSPENDED:
+      return "suspended";
+    case AGENT_EVENT_TYPE.RUN_FAILED:
+      return "failed";
+    case AGENT_EVENT_TYPE.RUN_CANCELLED:
+      return "cancelled";
+    default:
+      return "running";
+  }
+}
+
+export function materializeAgentRuns(ledger) {
+  const index = buildMemoryLedgerIndex(ledger);
+  const events = index.recordsByKind.get(MEMORY_RECORD_KIND.AGENT_EVENT) || [];
+  const eventsByRunId = new Map();
+  for (const event of events) {
+    const bucket = eventsByRunId.get(event.runId) || [];
+    bucket.push(event);
+    eventsByRunId.set(event.runId, bucket);
+  }
+  const runs = new Map();
+  for (const [runId, runEvents] of eventsByRunId) {
+    const orderedEvents = [...runEvents].sort((left, right) => {
+      const sequenceDelta = Number(left.sequence) - Number(right.sequence);
+      return sequenceDelta || compareLedgerOrder(left, right);
+    });
+    const firstEvent = orderedEvents[0] || null;
+    const latestEvent = orderedEvents.at(-1) || null;
+    const status = agentRunStatus(latestEvent?.eventType);
+    runs.set(runId, {
+      runId,
+      taskId: String(firstEvent?.taskId || latestEvent?.taskId || ""),
+      agentKind: String(firstEvent?.agentKind || latestEvent?.agentKind || ""),
+      status,
+      terminal: isTerminalAgentEventType(latestEvent?.eventType),
+      firstEvent,
+      latestEvent,
+      events: orderedEvents,
+    });
+  }
+  const ordered = [...runs.values()].sort((left, right) =>
+    compareLedgerOrder(left.firstEvent, right.firstEvent),
+  );
+  return {
+    runs,
+    ordered,
+    active: ordered.filter((run) => !run.terminal),
+    suspended: ordered.filter((run) => run.status === "suspended"),
+  };
+}
+
 export function materializeMemoryLedger(ledger) {
   const index = buildMemoryLedgerIndex(ledger);
   const evidence = materializeEvidenceState(ledger);
@@ -170,6 +227,7 @@ export function materializeMemoryLedger(ledger) {
     .filter((record) => !activeRelations.includes(record))
     .map((revision) => ({ revision, reasons: ["inactive-endpoint"] }));
   const inbox = materializeInboxState(ledger);
+  const agent = materializeAgentRuns(ledger);
   return {
     chatId: ledger.chatId,
     revision: ledger.revision,
@@ -187,6 +245,7 @@ export function materializeMemoryLedger(ledger) {
       ),
     },
     inbox,
+    agent,
     validationByRevisionId: validator.cache,
   };
 }

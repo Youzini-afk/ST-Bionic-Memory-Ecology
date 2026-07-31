@@ -14,6 +14,11 @@ import { getBmeHostAdapter } from "../host/runtime-host-adapter.js";
 import { getActiveTaskProfile } from "../prompting/prompt-profiles.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
+import {
+  attachOpenAICompatibleTools,
+  buildOpenAICompatibleTransportMessages,
+  normalizeOpenAICompatibleToolCalls,
+} from "./openai-tool-protocol.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
@@ -1295,21 +1300,26 @@ function normalizeLLMResponsePayload(payload) {
   if (typeof payload === "string") {
     return {
       content: payload.trim(),
+      toolCalls: [],
       finishReason: "",
       reasoningContent: "",
+      usage: null,
       raw: payload,
     };
   }
 
   const choice = payload?.choices?.[0] || {};
   const message = choice?.message || {};
+  const toolCalls = normalizeOpenAICompatibleToolCalls(payload);
   return {
     content: extractContentFromResponsePayload(payload).trim(),
+    toolCalls,
     finishReason: String(choice?.finish_reason || ""),
     reasoningContent:
       typeof message?.reasoning_content === "string"
         ? message.reasoning_content
         : "",
+    usage: cloneRuntimeDebugValue(payload?.usage || choice?.usage, null),
     raw: payload,
   };
 }
@@ -1426,22 +1436,7 @@ function normalizeLlmDebugMessage(message = {}) {
 }
 
 function buildTransportMessages(messages = []) {
-  return (Array.isArray(messages) ? messages : [])
-    .map((message) => {
-      if (!message || typeof message !== "object") {
-        return null;
-      }
-      const role = String(message.role || "").trim().toLowerCase();
-      const content = String(message.content || "").trim();
-      if (!content || !["system", "user", "assistant"].includes(role)) {
-        return null;
-      }
-      return {
-        role,
-        content,
-      };
-    })
-    .filter(Boolean);
+  return buildOpenAICompatibleTransportMessages(messages);
 }
 
 function buildJsonAttemptMessages(
@@ -1969,7 +1964,7 @@ function buildDedicatedRequestBody(
   transportMessages,
   filteredGeneration,
   resolvedCompletionTokens,
-  { jsonMode = false } = {},
+  { jsonMode = false, tools = [], toolChoice = "auto", forceNonStream = false } = {},
 ) {
   const routeMode = String(config?.llmRouteMode || "custom").trim() || "custom";
   const body = {
@@ -1977,11 +1972,13 @@ function buildDedicatedRequestBody(
     messages: transportMessages,
     temperature: filteredGeneration.temperature ?? 1,
     max_tokens: resolvedCompletionTokens,
-    stream: filteredGeneration.stream ?? false,
+    stream: forceNonStream ? false : filteredGeneration.stream ?? false,
     frequency_penalty: filteredGeneration.frequency_penalty ?? 0,
     presence_penalty: filteredGeneration.presence_penalty ?? 0,
     top_p: filteredGeneration.top_p ?? 1,
   };
+
+  attachOpenAICompatibleTools(body, tools, toolChoice);
 
   if (routeMode === "reverse-proxy") {
     body.chat_completion_source = resolveChatCompletionSourceValue(
@@ -2019,9 +2016,15 @@ async function callDedicatedOpenAICompatible(
     signal,
     jsonMode = false,
     maxCompletionTokens = null,
+    maxContextTokens = null,
+    maxCompletionTokensIsCeiling = false,
     taskType = "",
     requestSource = "",
     onStreamProgress = null,
+    tools = [],
+    toolChoice = "auto",
+    requireDedicated = false,
+    forceNonStream = false,
   } = {},
 ) {
   const privateRequestSource = resolvePrivateRequestSource(
@@ -2035,6 +2038,11 @@ async function callDedicatedOpenAICompatible(
   });
   const settings = extension_settings[MODULE_NAME] || {};
   const hasDedicatedConfig = hasDedicatedLLMConfig(config);
+  if (requireDedicated && !hasDedicatedConfig) {
+    throw new Error(
+      `${privateRequestSource}: BME Agent requires a configured BME model URL and model name`,
+    );
+  }
   if (taskType && config.llmPresetFallbackReason) {
     debugWarn(
       `[ST-BME] 任务 ${taskType} 指定的 API 模板不可用，已回退当前 API: ` +
@@ -2062,8 +2070,9 @@ async function callDedicatedOpenAICompatible(
   const filteredGeneration = {
     ...initialFilteredGeneration,
   };
-  const forceNonStream = hasDedicatedConfig && shouldForceDedicatedNonStream(config);
-  if (forceNonStream && filteredGeneration.stream === true) {
+  const dedicatedNonStream =
+    forceNonStream || (hasDedicatedConfig && shouldForceDedicatedNonStream(config));
+  if (dedicatedNonStream && filteredGeneration.stream === true) {
     filteredGeneration.stream = false;
   }
   const streamRequested =
@@ -2100,7 +2109,8 @@ async function callDedicatedOpenAICompatible(
     filteredGeneration,
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
-    streamForceDisabled: forceNonStream,
+    streamForceDisabled: dedicatedNonStream,
+    toolCount: Array.isArray(tools) ? tools.length : 0,
     effectiveRoute: buildEffectiveLlmRoute(
       hasDedicatedConfig,
       privateRequestSource,
@@ -2117,6 +2127,7 @@ async function callDedicatedOpenAICompatible(
       hostRouting.routeApplied === true,
     apiSettingsOverride: hostRouting.apiSettingsOverride,
     maxCompletionTokens,
+    maxContextTokens,
     ...buildStreamDebugSnapshot(streamState),
   });
   if (!hasDedicatedConfig) {
@@ -2132,8 +2143,9 @@ async function callDedicatedOpenAICompatible(
     );
     const normalized = normalizeLLMResponsePayload(payload);
     if (
-      typeof normalized.content === "string" &&
-      normalized.content.trim().length > 0
+      (typeof normalized.content === "string" &&
+        normalized.content.trim().length > 0) ||
+      normalized.toolCalls.length > 0
     ) {
       return normalized;
     }
@@ -2150,7 +2162,9 @@ async function callDedicatedOpenAICompatible(
   const resolvedCompletionTokens = Number.isFinite(
     filteredGeneration.max_completion_tokens,
   )
-    ? filteredGeneration.max_completion_tokens
+    ? maxCompletionTokensIsCeiling && Number.isFinite(maxCompletionTokens)
+      ? Math.min(filteredGeneration.max_completion_tokens, maxCompletionTokens)
+      : filteredGeneration.max_completion_tokens
     : completionTokens;
 
   const body = buildDedicatedRequestBody(
@@ -2158,7 +2172,7 @@ async function callDedicatedOpenAICompatible(
     transportMessages,
     filteredGeneration,
     resolvedCompletionTokens,
-    { jsonMode },
+    { jsonMode, tools, toolChoice, forceNonStream: dedicatedNonStream },
   );
 
   const optionalGenerationFields = [
@@ -2184,6 +2198,14 @@ async function callDedicatedOpenAICompatible(
   for (const field of optionalGenerationFields) {
     if (!Object.prototype.hasOwnProperty.call(filteredGeneration, field)) continue;
     body[field] = filteredGeneration[field];
+  }
+
+  if (Number.isFinite(Number(maxContextTokens)) && Number(maxContextTokens) > 0) {
+    body.max_context_tokens = Math.floor(Number(maxContextTokens));
+  }
+  if (Array.isArray(tools) && tools.length > 0) {
+    body.enable_function_calling = true;
+    body.stream = false;
   }
 
   if (Object.prototype.hasOwnProperty.call(filteredGeneration, "request_thoughts")) {
@@ -2217,7 +2239,8 @@ async function callDedicatedOpenAICompatible(
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
     resolvedCompletionTokens,
-    streamForceDisabled: forceNonStream,
+    streamForceDisabled: dedicatedNonStream,
+    toolCount: Array.isArray(tools) ? tools.length : 0,
     effectiveRoute: buildEffectiveLlmRoute(
       true,
       privateRequestSource,
@@ -2301,11 +2324,57 @@ async function _parseResponse(response) {
     throw new Error(`Memory LLM proxy error: ${data.error.message}`);
   }
   const normalized = normalizeLLMResponsePayload(data);
-  if (typeof normalized.content === "string" && normalized.content.length > 0) {
+  if (
+    (typeof normalized.content === "string" && normalized.content.length > 0) ||
+    normalized.toolCalls.length > 0
+  ) {
     return normalized;
   }
 
   throw new Error("Memory LLM API returned an unexpected response format");
+}
+
+/**
+ * Strict, non-streaming BME-owned model transport for the Agent runtime.
+ * Unlike callLLM, this never falls back to the active SillyTavern chat model
+ * and never converts provider failures into null.
+ */
+export async function callBmeAgentModel({
+  messages = [],
+  tools = [],
+  toolChoice = "auto",
+  signal,
+  maxCompletionTokens = null,
+  maxContextTokens = null,
+  taskType = "",
+  requestSource = "agent:bme",
+} = {}) {
+  const override = getLlmTestOverride("callBmeAgentModel");
+  if (override) {
+    return await override({
+      messages,
+      tools,
+      toolChoice,
+      signal,
+      maxCompletionTokens,
+      maxContextTokens,
+      taskType,
+      requestSource,
+    });
+  }
+  return await callDedicatedOpenAICompatible(messages, {
+    signal,
+    jsonMode: false,
+    maxCompletionTokens,
+    maxContextTokens,
+    maxCompletionTokensIsCeiling: true,
+    taskType,
+    requestSource,
+    tools,
+    toolChoice,
+    requireDedicated: true,
+    forceNonStream: true,
+  });
 }
 
 /**

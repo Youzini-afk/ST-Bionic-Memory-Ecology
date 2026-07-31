@@ -1,4 +1,5 @@
 import {
+  AGENT_EVENT_TYPE,
   MEMORY_INBOX_KIND,
   MEMORY_INBOX_STATUS,
   MEMORY_LAYER,
@@ -6,6 +7,7 @@ import {
   MEMORY_REVISION_STATUS,
   isMemoryInboxKind,
   isMemoryInboxStatus,
+  isAgentEventType,
   isMemoryLayer,
   isMemoryRevisionStatus,
   requireDomainId,
@@ -333,6 +335,58 @@ export function createTaskCheckpoint(input = {}) {
     stagedRecordIds: normalizeStringArray(input.stagedRecordIds),
     contextSummary: String(input.contextSummary || ""),
     metadata: plainObject(input.metadata),
+  };
+}
+
+export function createAgentEvent(input = {}) {
+  const chatId = requireDomainId(input.chatId, "agentEvent.chatId");
+  const runId = requireDomainId(input.runId, "agentEvent.runId");
+  const taskId = requireDomainId(input.taskId, "agentEvent.taskId");
+  const agentKind = requireDomainId(input.agentKind, "agentEvent.agentKind");
+  const eventType = String(input.eventType || "").trim();
+  if (!isAgentEventType(eventType)) {
+    throw new TypeError(`invalid agent event type: ${eventType}`);
+  }
+  const sequence = Number(input.sequence);
+  if (!Number.isInteger(sequence) || sequence < 0) {
+    throw new TypeError("agentEvent.sequence must be a non-negative integer");
+  }
+  const previousEventId = String(input.previousEventId || "").trim();
+  if (sequence > 0 && !previousEventId) {
+    throw new TypeError("agent event transition requires previousEventId");
+  }
+  if (sequence === 0 && eventType !== AGENT_EVENT_TYPE.RUN_STARTED) {
+    throw new TypeError("the first agent event must be run_started");
+  }
+  if (sequence > 0 && eventType === AGENT_EVENT_TYPE.RUN_STARTED) {
+    throw new TypeError("run_started cannot appear after the first agent event");
+  }
+  const payload = plainObject(input.payload);
+  const id = String(
+    input.id ||
+      createDomainId("agent-event", {
+        chatId,
+        runId,
+        sequence,
+        eventType,
+        previousEventId,
+        payload,
+      }),
+  );
+  return {
+    ...baseRecord(MEMORY_RECORD_KIND.AGENT_EVENT, {
+      ...input,
+      id,
+      chatId,
+    }),
+    runId,
+    taskId,
+    agentKind,
+    sequence,
+    eventType,
+    previousEventId,
+    sourceRecordIds: normalizeStringArray(input.sourceRecordIds),
+    payload,
   };
 }
 

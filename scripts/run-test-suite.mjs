@@ -5,6 +5,14 @@ import { spawn } from "node:child_process";
 const TEST_ROOT = path.resolve(process.cwd(), "tests");
 const EXCLUDED_TESTS = new Set(["triviumdb-poc.mjs"]);
 const PRODUCT_CONTRACT_TESTS = [
+  "agent-context-window.mjs",
+  "agent-journal.mjs",
+  "agent-llm-transport-contract.mjs",
+  "agent-loop.mjs",
+  "agent-model-protocol.mjs",
+  "agent-runtime-settings.mjs",
+  "agent-token-counter.mjs",
+  "agent-tool-registry.mjs",
   "authority-companion-module.mjs",
   "chat-transaction-coordinator.mjs",
   "conversation-identity-vnext.mjs",

@@ -1,6 +1,9 @@
 import {
+  AGENT_EVENT_TYPE,
   MEMORY_LEDGER_VERSION,
   MEMORY_RECORD_KIND,
+  isAgentEventTransitionAllowed,
+  isAgentEventType,
   isMemoryRecordKind,
   requireDomainId,
 } from "./memory-contract.js";
@@ -52,6 +55,7 @@ export function assertMemoryLedger(ledger) {
   const recordIds = new Set();
   let commitCount = 0;
   let parentCommitId = "";
+  const latestAgentEventByRunId = new Map();
   for (const record of ledger.records) {
     const id = String(record?.id || "").trim();
     const kind = String(record?.kind || "").trim();
@@ -78,6 +82,31 @@ export function assertMemoryLedger(ledger) {
       Number(record.ledgerRevision) > Number(ledger.revision)
     ) {
       issues.push(`ledger record ${id || "<unknown>"} has invalid revision`);
+    }
+    if (kind === MEMORY_RECORD_KIND.AGENT_EVENT) {
+      const runId = String(record?.runId || "").trim();
+      const previous = latestAgentEventByRunId.get(runId) || null;
+      if (!runId) {
+        issues.push(`agent event ${id || "<unknown>"} has no run id`);
+      } else if (!isAgentEventType(record.eventType)) {
+        issues.push(`agent event ${id || "<unknown>"} has an invalid type`);
+      } else if (!previous) {
+        if (
+          Number(record.sequence) !== 0 ||
+          record.eventType !== AGENT_EVENT_TYPE.RUN_STARTED ||
+          record.previousEventId
+        ) {
+          issues.push(`agent run ${runId} has an invalid first event`);
+        }
+      } else if (
+        Number(record.sequence) !== Number(previous.sequence) + 1 ||
+        String(record.previousEventId || "") !== previous.id ||
+        record.eventType === AGENT_EVENT_TYPE.RUN_STARTED ||
+        !isAgentEventTransitionAllowed(previous.eventType, record.eventType)
+      ) {
+        issues.push(`agent run ${runId} has an invalid event chain at ${id || "<unknown>"}`);
+      }
+      if (runId) latestAgentEventByRunId.set(runId, record);
     }
   }
   if (commitCount !== Number(ledger.revision)) {
@@ -192,6 +221,32 @@ function validateRecordReferences(records, index) {
         issues.push(`${record.id} references invalid inbox predecessor`);
       } else if (Number(record.sequence) !== Number(previous.sequence) + 1) {
         issues.push(`${record.id} has a non-contiguous inbox sequence`);
+      }
+    }
+    if (record.kind === MEMORY_RECORD_KIND.AGENT_EVENT) {
+      if (Number(record.sequence) === 0) {
+        if (record.previousEventId) {
+          issues.push(`${record.id} has an unexpected agent predecessor`);
+        }
+      } else {
+        const previous = available.get(record.previousEventId);
+        if (
+          previous?.kind !== MEMORY_RECORD_KIND.AGENT_EVENT ||
+          previous.runId !== record.runId
+        ) {
+          issues.push(`${record.id} references invalid agent predecessor`);
+        } else if (Number(record.sequence) !== Number(previous.sequence) + 1) {
+          issues.push(`${record.id} has a non-contiguous agent sequence`);
+        } else if (!isAgentEventTransitionAllowed(previous.eventType, record.eventType)) {
+          issues.push(
+            `${record.id} has an invalid agent transition ${previous.eventType} -> ${record.eventType}`,
+          );
+        }
+      }
+      for (const sourceRecordId of record.sourceRecordIds || []) {
+        if (!available.has(sourceRecordId)) {
+          issues.push(`${record.id} references missing source record ${sourceRecordId}`);
+        }
       }
     }
   }

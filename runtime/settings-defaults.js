@@ -2,6 +2,10 @@ import {
   createDefaultGlobalTaskRegex,
   createDefaultTaskProfiles,
 } from "../prompting/prompt-profiles.js";
+import {
+  DEFAULT_BME_AGENT_CONTEXT_WINDOW_TOKENS,
+} from "../agent/runtime-settings.js";
+import { DEFAULT_BME_AGENT_GUARD } from "../domain/memory-contract.js";
 
 function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   const numeric = Number(value);
@@ -108,6 +112,9 @@ export const defaultSettings = {
   llmModel: "",
   llmPresets: {},
   llmActivePreset: "",
+  agentContextWindowTokens: DEFAULT_BME_AGENT_CONTEXT_WINDOW_TOKENS,
+  agentMaxToolCalls: DEFAULT_BME_AGENT_GUARD.maxToolCalls,
+  agentMaxRunMs: DEFAULT_BME_AGENT_GUARD.maxRunMs,
 
   // Embedding API 配置
   embeddingApiUrl: "",

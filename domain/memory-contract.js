@@ -15,6 +15,22 @@ export const MEMORY_RECORD_KIND = Object.freeze({
   COMMIT: "commit",
   INBOX_ITEM: "inbox_item",
   TASK_CHECKPOINT: "task_checkpoint",
+  AGENT_EVENT: "agent_event",
+});
+
+export const AGENT_EVENT_TYPE = Object.freeze({
+  RUN_STARTED: "run_started",
+  MODEL_REQUESTED: "model_requested",
+  ASSISTANT_MESSAGE: "assistant_message",
+  TOOL_STARTED: "tool_started",
+  TOOL_FINISHED: "tool_finished",
+  TOOL_INTERRUPTED: "tool_interrupted",
+  CONTEXT_SUMMARY_CREATED: "context_summary_created",
+  CONTEXT_COMPACTED: "context_compacted",
+  RUN_COMPLETED: "run_completed",
+  RUN_SUSPENDED: "run_suspended",
+  RUN_FAILED: "run_failed",
+  RUN_CANCELLED: "run_cancelled",
 });
 
 export const MEMORY_LAYER = Object.freeze({
@@ -69,6 +85,44 @@ const MEMORY_LAYERS = new Set(Object.values(MEMORY_LAYER));
 const REVISION_STATUSES = new Set(Object.values(MEMORY_REVISION_STATUS));
 const INBOX_KINDS = new Set(Object.values(MEMORY_INBOX_KIND));
 const INBOX_STATUSES = new Set(Object.values(MEMORY_INBOX_STATUS));
+const AGENT_EVENT_TYPES = new Set(Object.values(AGENT_EVENT_TYPE));
+const TERMINAL_AGENT_EVENT_TYPES = new Set([
+  AGENT_EVENT_TYPE.RUN_COMPLETED,
+  AGENT_EVENT_TYPE.RUN_SUSPENDED,
+  AGENT_EVENT_TYPE.RUN_FAILED,
+  AGENT_EVENT_TYPE.RUN_CANCELLED,
+]);
+const AGENT_EVENT_TRANSITIONS = new Map([
+  [AGENT_EVENT_TYPE.RUN_STARTED, new Set([AGENT_EVENT_TYPE.MODEL_REQUESTED])],
+  [
+    AGENT_EVENT_TYPE.MODEL_REQUESTED,
+    new Set([
+      AGENT_EVENT_TYPE.ASSISTANT_MESSAGE,
+      AGENT_EVENT_TYPE.CONTEXT_SUMMARY_CREATED,
+    ]),
+  ],
+  [
+    AGENT_EVENT_TYPE.CONTEXT_SUMMARY_CREATED,
+    new Set([
+      AGENT_EVENT_TYPE.MODEL_REQUESTED,
+      AGENT_EVENT_TYPE.CONTEXT_COMPACTED,
+    ]),
+  ],
+  [AGENT_EVENT_TYPE.CONTEXT_COMPACTED, new Set([AGENT_EVENT_TYPE.MODEL_REQUESTED])],
+  [
+    AGENT_EVENT_TYPE.ASSISTANT_MESSAGE,
+    new Set([AGENT_EVENT_TYPE.TOOL_STARTED, AGENT_EVENT_TYPE.RUN_COMPLETED]),
+  ],
+  [
+    AGENT_EVENT_TYPE.TOOL_STARTED,
+    new Set([AGENT_EVENT_TYPE.TOOL_FINISHED, AGENT_EVENT_TYPE.TOOL_INTERRUPTED]),
+  ],
+  [
+    AGENT_EVENT_TYPE.TOOL_FINISHED,
+    new Set([AGENT_EVENT_TYPE.TOOL_STARTED, AGENT_EVENT_TYPE.MODEL_REQUESTED]),
+  ],
+  [AGENT_EVENT_TYPE.TOOL_INTERRUPTED, new Set()],
+]);
 
 export function normalizeDomainId(value = "") {
   return String(value ?? "").trim();
@@ -98,6 +152,28 @@ export function isMemoryInboxKind(value) {
 
 export function isMemoryInboxStatus(value) {
   return INBOX_STATUSES.has(String(value || ""));
+}
+
+export function isAgentEventType(value) {
+  return AGENT_EVENT_TYPES.has(String(value || ""));
+}
+
+export function isTerminalAgentEventType(value) {
+  return TERMINAL_AGENT_EVENT_TYPES.has(String(value || ""));
+}
+
+export function isAgentEventTransitionAllowed(previousType, nextType) {
+  const previous = String(previousType || "");
+  const next = String(nextType || "");
+  if (!isAgentEventType(previous) || !isAgentEventType(next)) return false;
+  if (isTerminalAgentEventType(previous)) return false;
+  if (
+    isTerminalAgentEventType(next) &&
+    next !== AGENT_EVENT_TYPE.RUN_COMPLETED
+  ) {
+    return true;
+  }
+  return AGENT_EVENT_TRANSITIONS.get(previous)?.has(next) === true;
 }
 
 export function createEmptyMemoryLedger({ chatId, now = Date.now() } = {}) {

@@ -13,7 +13,7 @@ The durable authority is a per-chat append-only ledger. Its records contain:
 3. versioned objective, POV, and derived memories with explicit dependencies;
 4. versioned relations;
 5. atomic commits;
-6. durable inbox items and Agent checkpoints.
+6. durable inbox items, Agent checkpoints, and append-only Agent boundary events.
 
 The visible graph, timeline, cognition view, summaries, vector index, and recall
 candidate caches are materialized projections. They may be rebuilt and never
@@ -66,7 +66,11 @@ imports only the evidence and memory revisions valid at its cutoff.
 
 BME model presets own the model and its context-window size. Context compaction
 is token-aware: it changes the Agent-visible projection while preserving the
-full durable journal. There is no character-count cap. The only default runaway
+full durable journal. A provider request and every tool start are journaled
+before crossing their boundary; an interrupted boundary is suspended rather
+than replayed. Tool registrations are snapshotted for a run, so a hot reload
+cannot silently change the implementation midway through that run. There is no
+character-count cap. The only default runaway
 guards are 500 tool calls and eight minutes, both configurable in BME.
 
 ## Host boundary
