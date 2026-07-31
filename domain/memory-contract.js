@@ -17,7 +17,6 @@ export const MEMORY_RECORD_KIND = Object.freeze({
   TASK_CHECKPOINT: "task_checkpoint",
   AGENT_EVENT: "agent_event",
   TURN_ARTIFACT: "turn_artifact",
-  MIGRATION: "migration",
 });
 
 export const AGENT_EVENT_TYPE = Object.freeze({

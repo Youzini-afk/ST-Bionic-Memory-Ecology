@@ -544,52 +544,27 @@ export async function onImportGraphController(runtime) {
 
       try {
         const text = await file.text();
-        const normalizedText = String(text || "").replace(/^\uFEFF/, "");
-        const parsed = JSON.parse(normalizedText);
-        if (
-          !parsed ||
-          typeof parsed !== "object" ||
-          Array.isArray(parsed) ||
-          !Number.isFinite(Number(parsed.version)) ||
-          !Array.isArray(parsed.nodes) ||
-          !Array.isArray(parsed.edges)
-        ) {
-          throw new TypeError("文件不是有效的 ST-BME 图谱导出");
-        }
         const importedGraph = runtime.normalizeGraphRuntimeState(
-          runtime.importGraph(normalizedText),
+          runtime.importGraph(text),
           runtime.getCurrentChatId(),
         );
-        if (
-          !Array.isArray(importedGraph?.nodes) ||
-          !Array.isArray(importedGraph?.edges) ||
-          importedGraph.nodes.length !== parsed.nodes.length ||
-          importedGraph.edges.length !== parsed.edges.length
-        ) {
-          throw new TypeError("图谱解析结果不完整，未修改记忆账本");
-        }
         const historyRebind = rebindImportedGraphToCurrentChat(
           runtime,
           importedGraph,
         );
-        if (typeof runtime.replaceGraphWithLedger !== "function") {
-          throw new Error("当前运行时不支持 Agent 记忆账本导入，未修改任何数据");
-        }
-        const imported = await runtime.replaceGraphWithLedger(importedGraph, {
-          reason: "manual-graph-import",
-        });
-        const projectedGraph = imported?.projection?.graph || importedGraph;
+        runtime.setCurrentGraph(importedGraph);
         runtime.markVectorStateDirty("导入图谱后需要重建向量索引");
         runtime.setExtractionCount(
-          Math.max(0, Number(projectedGraph?.historyState?.extractionCount) || 0),
+          Math.max(0, Number(importedGraph?.historyState?.extractionCount) || 0),
         );
         runtime.setLastExtractedItems([]);
-        runtime.updateLastRecalledItems(projectedGraph.lastRecallResult || []);
+        runtime.updateLastRecalledItems(importedGraph.lastRecallResult || []);
         runtime.clearInjectionState();
+        runtime.saveGraphToChat({ reason: "graph-import-complete" });
         runtime.toastr.success(
           historyRebind?.rebound === true
-            ? "图谱已导入记忆账本，并已重新绑定当前聊天历史"
-            : "图谱已导入记忆账本",
+            ? "图谱已导入，并已重新绑定当前聊天历史"
+            : "图谱已导入",
         );
         finish({ imported: true, handledToast: true });
       } catch (err) {
@@ -1136,18 +1111,12 @@ export async function onUndoLastMaintenanceController(runtime) {
 // ==================== 数据清理 ====================
 
 export async function onClearGraphController(runtime) {
-  if (!runtime.confirm("确定要清空当前图谱？\n\n当前有效节点和关系会写入归档事务，可由历史账本审计。")) {
+  if (!runtime.confirm("确定要清空当前图谱？\n\n所有节点和边将被删除，操作不可撤销。")) {
     return { cancelled: true };
   }
   if (!runtime.ensureGraphMutationReady("清空图谱")) return;
   const chatId = runtime.getCurrentChatId?.();
 
-  if (typeof runtime.archiveAllGraphMemories !== "function") {
-    throw new Error("当前运行时不支持 Agent 记忆账本清空，未修改任何数据");
-  }
-  const archived = await runtime.archiveAllGraphMemories({
-    reason: "manual-clear-graph",
-  });
   if (chatId && typeof runtime.clearCurrentChatRecoveryAnchors === "function") {
     runtime.clearCurrentChatRecoveryAnchors({
       chatId,
@@ -1158,10 +1127,21 @@ export async function onClearGraphController(runtime) {
       clearPendingPersist: true,
     });
   }
+
+  const nextGraph = runtime.normalizeGraphRuntimeState(
+    runtime.createEmptyGraph(),
+    runtime.getCurrentChatId(),
+  );
+  runtime.setCurrentGraph(nextGraph);
   runtime.clearInjectionState();
-  runtime.markVectorStateDirty?.("清空记忆账本投影后需要重建向量索引");
+  runtime.markVectorStateDirty?.("清空图谱后需要重建向量索引");
   runtime.setExtractionCount(0);
   runtime.setLastExtractedItems([]);
+  runtime.saveGraphToChat({
+    reason: "manual-clear-graph",
+    persistMetadata: true,
+    captureShadow: false,
+  });
   runtime.refreshPanelLiveState();
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const remoteSyncMayRestore =
@@ -1169,10 +1149,10 @@ export async function onClearGraphController(runtime) {
     String(runtime.getSettings?.()?.cloudStorageMode || "automatic") !== "manual";
   runtime.toastr.success(
     remoteSyncMayRestore
-      ? "当前有效记忆已归档；若远端仍有旧副本，请同步后检查账本合并结果"
-      : `当前有效记忆已归档（${archived?.archivedMemoryIds?.length || 0} 个节点）`,
+      ? "当前图谱已清空；若刷新后旧节点重新出现，请再清空服务端同步数据"
+      : "当前图谱已清空",
   );
-  return { handledToast: true, archived };
+  return { handledToast: true };
 }
 
 export async function onClearGraphRangeController(runtime, startSeq, endSeq) {
@@ -1182,7 +1162,7 @@ export async function onClearGraphRangeController(runtime, startSeq, endSeq) {
   }
   if (
     !runtime.confirm(
-      `确定要归档楼层 ${startSeq} ~ ${endSeq} 范围内的所有节点？\n\n该操作会写入记忆账本事务。`,
+      `确定要删除楼层 ${startSeq} ~ ${endSeq} 范围内的所有节点？\n\n操作不可撤销。`,
     )
   ) {
     return { cancelled: true };
@@ -1199,20 +1179,20 @@ export async function onClearGraphRangeController(runtime, startSeq, endSeq) {
     return nodeEnd >= startSeq && nodeStart <= endSeq;
   });
 
-  if (typeof runtime.archiveGraphMemories !== "function") {
-    throw new Error("当前运行时不支持 Agent 记忆账本范围归档，未修改任何数据");
+  let removedCount = 0;
+  for (const node of nodesToRemove) {
+    if (runtime.removeNode(graph, node.id)) {
+      removedCount += 1;
+    }
   }
-  const archived = await runtime.archiveGraphMemories(
-    nodesToRemove.map((node) => node.id),
-    { reason: "manual-clear-graph-range" },
-  );
-  const removedCount = archived?.archivedMemoryIds?.length || 0;
+
   if (removedCount > 0) {
-    runtime.markVectorStateDirty?.("按楼层范围归档后需要重建向量索引");
+    runtime.markVectorStateDirty?.("按楼层范围清理后需要重建向量索引");
+    runtime.saveGraphToChat({ reason: "manual-clear-graph-range" });
   }
   runtime.refreshPanelLiveState();
-  runtime.toastr.success(`已归档楼层 ${startSeq}~${endSeq} 范围内 ${removedCount} 个节点`);
-  return { handledToast: true, archived };
+  runtime.toastr.success(`已删除楼层 ${startSeq}~${endSeq} 范围内 ${removedCount} 个节点`);
+  return { handledToast: true };
 }
 
 export async function onClearVectorCacheController(runtime) {

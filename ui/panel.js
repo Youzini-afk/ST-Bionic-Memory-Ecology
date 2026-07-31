@@ -4781,7 +4781,7 @@ function _refreshDashboard() {
   );
   _setText(
     "bme-status-background-maintenance",
-    _formatBackgroundMaintenanceSummary(loadInfo?.backgroundMaintenance, lastBatchStatus, loadInfo?.memorySteward),
+    _formatBackgroundMaintenanceSummary(loadInfo?.backgroundMaintenance, lastBatchStatus),
   );
   _refreshPersistenceRepairUi(loadInfo, lastBatchStatus);
   _setText("bme-status-last-vector", formatUiStatusMeta(vectorStatus) || t("status.initial.vector.detail"));
@@ -6584,7 +6584,7 @@ function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {
   return { ok: true, updates };
 }
 
-async function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
+function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
   if (!nodeId) return false;
   if (!_ensurePluginEnabledForAction("节点编辑")) {
     return false;
@@ -6594,10 +6594,10 @@ async function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
     return false;
   }
 
-  const result = await Promise.resolve(_actionHandlers.saveGraphNode?.({
+  const result = _actionHandlers.saveGraphNode?.({
     nodeId,
     updates,
-  }));
+  });
   if (!result?.ok) {
     toastr.error(
       result?.error === "node-not-found"
@@ -6621,7 +6621,7 @@ async function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
   return true;
 }
 
-async function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
+function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
   if (!nodeId) return false;
   if (!_ensurePluginEnabledForAction("节点删除")) {
     return false;
@@ -6642,7 +6642,7 @@ async function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
     return false;
   }
 
-  const result = await Promise.resolve(_actionHandlers.deleteGraphNode?.({ nodeId }));
+  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
   if (!result?.ok) {
     toastr.error(
       result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
@@ -7826,6 +7826,11 @@ function _refreshConfigTab() {
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,
   );
+  _setCheckboxValue(
+    "bme-setting-extract-auto-enabled",
+    settings.extractAutoEnabled ?? true,
+  );
+  _refreshMaintenanceExecutionModeUi(settings);
   _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
   _setCheckboxValue(
     "bme-setting-recall-vector-prefilter-enabled",
@@ -7908,6 +7913,14 @@ function _refreshConfigTab() {
     settings.injectLowConfidenceObjectiveMemory ?? false,
   );
   _setCheckboxValue(
+    "bme-setting-consolidation-enabled",
+    settings.enableConsolidation ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-synopsis-enabled",
+    settings.enableHierarchicalSummary ?? settings.enableSynopsis ?? true,
+  );
+  _setCheckboxValue(
     "bme-setting-visibility-enabled",
     settings.enableVisibility ?? false,
   );
@@ -7916,8 +7929,24 @@ function _refreshConfigTab() {
     settings.enableCrossRecall ?? false,
   );
   _setCheckboxValue(
+    "bme-setting-smart-trigger-enabled",
+    settings.enableSmartTrigger ?? false,
+  );
+  _setCheckboxValue(
+    "bme-setting-sleep-cycle-enabled",
+    settings.enableSleepCycle ?? false,
+  );
+  _setCheckboxValue(
+    "bme-setting-auto-compression-enabled",
+    settings.enableAutoCompression ?? true,
+  );
+  _setCheckboxValue(
     "bme-setting-prob-recall-enabled",
     settings.enableProbRecall ?? false,
+  );
+  _setCheckboxValue(
+    "bme-setting-reflection-enabled",
+    settings.enableReflection ?? false,
   );
   _setInputValue(
     "bme-setting-recall-card-user-input-display-mode",
@@ -8173,9 +8202,6 @@ function _refreshConfigTab() {
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
   _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
   _setInputValue("bme-setting-llm-model", settings.llmModel || "");
-  _setInputValue("bme-setting-agent-context-window-tokens", settings.agentContextWindowTokens ?? 128000);
-  _setInputValue("bme-setting-agent-max-tool-calls", settings.agentMaxToolCalls ?? 500);
-  _setInputValue("bme-setting-agent-max-run-minutes", Math.max(1, Math.round((settings.agentMaxRunMs ?? 480000) / 60000)));
   _refreshMemoryLlmProviderHelp(settings.llmApiUrl || "");
   _populateLlmPresetSelect(settings.llmPresets || {}, resolvedActiveLlmPreset);
   _syncLlmPresetControls(resolvedActiveLlmPreset);
@@ -8298,6 +8324,22 @@ function _bindConfigControls() {
     _refreshGuardedConfigStates();
     _refreshStageCardStates();
   });
+  bindCheckbox("bme-setting-extract-auto-enabled", (checked) => {
+    _patchSettings({ extractAutoEnabled: checked });
+  });
+  const maintenanceModeEl = document.getElementById(
+    "bme-setting-maintenance-execution-mode",
+  );
+  if (maintenanceModeEl && maintenanceModeEl.dataset.bmeBound !== "true") {
+    maintenanceModeEl.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-mode]");
+      if (!button) return;
+      const mode = normalizeMaintenanceExecutionMode(button.dataset.mode);
+      const settings = _patchSettings({ maintenanceExecutionMode: mode });
+      _refreshMaintenanceExecutionModeUi(settings);
+    });
+    maintenanceModeEl.dataset.bmeBound = "true";
+  }
   bindCheckbox("bme-setting-recall-llm", (checked) => {
     _patchSettings({ recallEnableLLM: checked });
     _refreshGuardedConfigStates();
@@ -8368,14 +8410,41 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-inject-low-confidence-objective-memory", (checked) => {
     _patchSettings({ injectLowConfidenceObjectiveMemory: checked });
   });
+  bindCheckbox("bme-setting-consolidation-enabled", (checked) => {
+    _patchSettings({ enableConsolidation: checked });
+    _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-synopsis-enabled", (checked) => {
+    _patchSettings({
+      enableHierarchicalSummary: checked,
+      enableSynopsis: checked,
+    });
+    _refreshGuardedConfigStates();
+  });
   bindCheckbox("bme-setting-visibility-enabled", (checked) =>
     _patchSettings({ enableVisibility: checked }),
   );
   bindCheckbox("bme-setting-cross-recall-enabled", (checked) =>
     _patchSettings({ enableCrossRecall: checked }),
   );
+  bindCheckbox("bme-setting-smart-trigger-enabled", (checked) => {
+    _patchSettings({ enableSmartTrigger: checked });
+    _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-sleep-cycle-enabled", (checked) => {
+    _patchSettings({ enableSleepCycle: checked });
+    _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-auto-compression-enabled", (checked) => {
+    _patchSettings({ enableAutoCompression: checked });
+    _refreshGuardedConfigStates();
+  });
   bindCheckbox("bme-setting-prob-recall-enabled", (checked) => {
     _patchSettings({ enableProbRecall: checked });
+    _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-reflection-enabled", (checked) => {
+    _patchSettings({ enableReflection: checked });
     _refreshGuardedConfigStates();
   });
   const recallCardUserInputDisplayModeEl = document.getElementById(
@@ -8652,8 +8721,49 @@ function _bindConfigControls() {
   bindFloat("bme-setting-importance-weight", 0.1, 0, 1, (value) =>
     _patchSettings({ importanceWeight: value }),
   );
+  bindNumber("bme-setting-consolidation-neighbor-count", 5, 1, 20, (value) =>
+    _patchSettings({ consolidationNeighborCount: value }),
+  );
+  bindFloat("bme-setting-consolidation-threshold", 0.85, 0.5, 0.99, (value) =>
+    _patchSettings({ consolidationThreshold: value }),
+  );
+  bindNumber("bme-setting-synopsis-every", 3, 1, 100, (value) =>
+    _patchSettings({
+      smallSummaryEveryNExtractions: value,
+      synopsisEveryN: value,
+    }),
+  );
+  bindText("bme-setting-trigger-patterns", (value) =>
+    _patchSettings({ triggerPatterns: value }),
+  );
+  bindNumber("bme-setting-smart-trigger-threshold", 2, 1, 10, (value) =>
+    _patchSettings({ smartTriggerThreshold: value }),
+  );
+  bindFloat("bme-setting-forget-threshold", 0.5, 0.1, 1, (value) =>
+    _patchSettings({ forgetThreshold: value }),
+  );
+  bindNumber(
+    "bme-setting-consolidation-auto-min-new-nodes",
+    2,
+    1,
+    50,
+    (value) => _patchSettings({ consolidationAutoMinNewNodes: value }),
+  );
+  bindNumber(
+    "bme-setting-compression-every",
+    10,
+    0,
+    500,
+    (value) => _patchSettings({ compressionEveryN: value }),
+  );
+  bindNumber("bme-setting-sleep-every", 10, 1, 200, (value) =>
+    _patchSettings({ sleepEveryN: value }),
+  );
   bindFloat("bme-setting-prob-recall-chance", 0.15, 0.01, 0.5, (value) =>
     _patchSettings({ probRecallChance: value }),
+  );
+  bindNumber("bme-setting-reflect-every", 10, 1, 200, (value) =>
+    _patchSettings({ reflectEveryN: value }),
   );
   bindNumber(
     "bme-setting-graph-native-layout-threshold-nodes",
@@ -8845,12 +8955,6 @@ function _bindConfigControls() {
     _patchSettings({ llmModel: value.trim() });
     _markLlmPresetDirty();
   });
-  bindNumber("bme-setting-agent-context-window-tokens", 128000, 1024, Number.MAX_SAFE_INTEGER, (value) =>
-    _patchSettings({ agentContextWindowTokens: value }));
-  bindNumber("bme-setting-agent-max-tool-calls", 500, 1, Number.MAX_SAFE_INTEGER, (value) =>
-    _patchSettings({ agentMaxToolCalls: value }));
-  bindNumber("bme-setting-agent-max-run-minutes", 8, 1, Number.MAX_SAFE_INTEGER, (value) =>
-    _patchSettings({ agentMaxRunMs: value * 60000 }));
   bindNumber("bme-setting-timeout-ms", 300000, 1000, 3600000, (value) =>
     _patchSettings({ timeoutMs: value }),
   );
@@ -13902,13 +14006,7 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   return "尚未执行持久化";
 }
 
-function _formatBackgroundMaintenanceSummary(queue = null, batchStatus = null, steward = null) {
-  if (steward && typeof steward === "object") {
-    const state = String(steward.state || "idle");
-    if (state === "running") return `Memory Steward 运行中 · ${Number(steward.inboxCount || 0)} 项`;
-    if (state === "deferred") return `Memory Steward 已延后${steward.error ? ` · ${steward.error}` : ""}`;
-    if (state === "completed") return "Memory Steward 已完成后台整理";
-  }
+function _formatBackgroundMaintenanceSummary(queue = null, batchStatus = null) {
   const queuedTasks = Array.isArray(batchStatus?.backgroundMaintenanceTasks)
     ? batchStatus.backgroundMaintenanceTasks
     : [];

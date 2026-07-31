@@ -8,18 +8,7 @@
 
 没有单一事实源，也没有把"做决定"和"写入"分开。每个修复都是在这些接缝上打补丁，于是每修一个就冒出下一个。
 
-解决方向：把控制平面抽成**纯逻辑/注入式模块**，并让每张聊天记录的 append-only 账本成为唯一语义主源，让整类 bug 在结构上不可能发生。完整契约见 [`agent-memory-vnext.md`](agent-memory-vnext.md)。
-
-## 当前唯一写入边界
-
-`application/memory-lifecycle-runtime.js` 是生产组合根。历史协调、Memory Steward、Recall Agent、Planner Artifact、分支和手动编辑都通过它访问同一个 `MemoryLedgerRepository`：
-
-- 楼层正文先成为不可变 evidence；编辑、删除和 swipe 追加 disposition，不改写旧记录。
-- 记忆与关系通过新 revision 演进；图谱、时间线、认知视图、总结和向量索引只是可重建投影。
-- 同聊天写入由 coordinator 串行；Agent 等待 LLM/工具时不占写锁，提交前复核证据、读取依赖与 ledger head。
-- 普通 ST、Luker、Authority 只改变物理 store，不改变领域事务。Luker 失败不得回退本地，Cloud Sync 也不是第二主源。
-
-旧 `graphPersistenceState` 与 reducer 仍负责兼容图谱缓存、诊断和旧存储层确认，但不再决定一条 Agent 记忆是否在语义上提交成功。
+解决方向：把控制平面抽成**纯逻辑/注入式模块**，让整类 bug 在结构上不可能发生。
 
 ## 身份解析
 
@@ -58,7 +47,7 @@
 
 提取与历史恢复还捕获聊天内容 fingerprint。session lease 防跨聊天晚到，history fingerprint 防同一聊天在异步任务期间再次编辑；任一失效都不能发布 working graph。
 
-## 兼容图谱的持久化确认状态机
+## 持久化确认状态机
 
 持久化确认逻辑收敛在 `sync/persistence-reducer.js`，是**纯函数**：无 IO、无图谱变更、无 UI 副作用。
 
@@ -83,11 +72,11 @@
 
 历史上的语义修复（Phase 2 引入不变量、Phase 5 把调用点改为显式事件）都保留在该文件头注释里。
 
-### 原子账本发布与投影
+### 原子回合发布
 
-Memory Steward 先在 run workspace 中构造 Change Set；只有领域校验和物理 store CAS 都成功后，evidence、memory/relation revision、Inbox/Agent 事件与 commit 才形成一条合法账本前缀。失败不会部分发布。
+提取器和同步维护只修改 detached working graph。待提交快照同时包含图谱变更、`extractionCount`、processed floor/hash、batch journal 与向量 dirty 状态；只有规范主存储确认后才通过一次 `setCurrentGraph` 发布。pending、失败或聊天切换都不会部分推进 live graph。
 
-随后 `projectMemoryLedgerToGraph()` 从已提交账本生成兼容图谱。图谱缓存保存失败不会把账本提交改判为失败；反过来，缓存先写成功也不能让未提交的 Change Set 生效。只有发起聊天仍是活动聊天时，投影才进入当前 UI；晚到任务只能在原聊天耐久层完成。
+pending retry 必须从排队聊天自己的 shadow、metadata recovery snapshot 或同身份运行图谱取源；找不到就 fail closed。重试成功时也只有排队聊天仍为活动聊天才发布整张快照，不能只补 floor/hash，更不能借用另一个聊天的 `currentGraph`。
 
 ## 图谱可写性门禁
 
@@ -109,22 +98,22 @@ Memory Steward 先在 run workspace 中构造 Change Set；只有领域校验和
 
 **reroll 不变量：**
 
-> reroll 助手楼层时，父 user 的输入版本未变就复用该回合耐久的 Recall / Planner Artifact，绝不重新运行 Recall Agent 或 ENA；被替换 assistant 的 evidence 失效、旧 swipe evidence 的重新激活则由历史协调独立完成。
+> reroll 助手楼层时，若上方用户楼层未变且存在可复用的持久召回记录，则复用父 user 楼层 `message.extra.bme_recall` 中的注入块；但被 reroll 的助手楼层的**图谱回滚必须保留**（走既有 `onReroll` 路径）。
 
-换句话说：回合语义快照稳定复用，助手证据版本照常变化。两者不能混为一谈。
+换句话说：召回注入可以复用，但图谱状态该回滚还得回滚。两者不能混为一谈——这是"reroll 乱召回"修复的核心。
 
 设计纪律：**计算与注入解耦，信任宿主生成类型，不用输入源猜 reroll**。`GENERATION_STARTED` / `GENERATION_AFTER_COMMANDS` 传入的 `type` 是权威信号：`swipe`、`regenerate`、`continue` 属于 no-new-user 生成，优先绑定上方可见 user 楼层的持久召回；`normal` 才代表新输入，需要 fresh recall。`MESSAGE_DELETED` 在 regenerate 代际中只作为预期删除处理，不会擦掉本轮召回事务。
 
 no-new-user 的稳定路径分两段：
 
 1. `GENERATION_AFTER_COMMANDS` 不做召回计算，直接跳过并把工作推迟到 before-combine。
-2. `GENERATE_BEFORE_COMBINE_PROMPTS` 从父 user 楼层与 ledger Artifact 确定性重放召回块；命中后不进入新 Recall Agent。缺失或失效是明确错误/空结果边界，不通过重跑制造另一份 reroll 语义。
+2. `GENERATE_BEFORE_COMBINE_PROMPTS` 先调用 `reapplyPersistedRecallBlock`，从父 user 楼层的 `message.extra.bme_recall` 确定性重放召回块；命中后立即返回，不进入 transaction / `runRecall`。若没有记录或记录已陈旧，再落回既有 transaction + compute 兼容路径。
 
-overswipe 的空 assistant 占位不会变成有效 evidence。替换回复到达后，历史协调使旧 evidence 失效并登记新版本；新代际仍复用父 user 的 Artifact。
+overswipe 的空 assistant 占位不触发空文本回滚/提取。它只留下 durable `awaiting-replacement` checkpoint；替换回复到达后，自动历史恢复负责回滚旧图谱效果并重放，新代际仍复用父 user 的持久召回。
 
 旧的召回事务机制仍保留为 fresh normal 和 fallback compute 的基础设施；它不再是 reroll 已存召回注入的唯一门闸。
 
-ENA Planner 只建立一个 planner turn handoff，同时携带原始输入、增强输入、Recall Artifact（包括合法的 `empty`）与可选 plot。fresh normal generation 校验增强输入后复用同一 Artifact，不会因为空结果再次召回。`MESSAGE_SENT` 用同一 generation 的匹配证据把 Recall / Planner Artifact 与 `message.extra.st_bme_plot` 绑定到新 user 楼层。
+ENA Planner 只建立一个 planner turn handoff，同时携带原始输入、增强输入、可选 recall 与可选 plot。fresh normal generation 校验增强输入后可复用 recall；空 recall 不会阻断正常召回；reroll 不读取这条交接。`MESSAGE_SENT` 用同一 generation 的匹配证据把 recall 与 `message.extra.st_bme_plot` 一次绑定到新 user 楼层。
 
 ## 副本一致性模型
 

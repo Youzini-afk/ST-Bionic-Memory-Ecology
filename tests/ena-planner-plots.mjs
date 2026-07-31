@@ -331,20 +331,13 @@ import {
     plannerAugmentedMessage: 'raw latest\n\n<note>private</note>\n<plot>structured</plot>\n<state>hidden</state>',
     plannerRecallInjectionText: 'planner memory snapshot',
     plotText: '<note>private</note>\n<plot>structured</plot>\n<state>hidden</state>',
-    recallArtifactId: 'artifact:structured-history',
-    plannerArtifactId: 'artifact:planner-history',
-    recallChatId: 'chat:structured-history',
-    recallTurnId: 'turn:structured-history',
-    recallInputFingerprint: 'input:structured-history',
-    recallHistoryFingerprint: 'history:structured-history',
-    recallMemoryStateFingerprint: 'memory-state:structured-history',
   }));
   assert.equal(chat[2].extra.st_bme_plot.plannerRecallInjectionText, 'planner memory snapshot');
   const history = readPlannerPlotHistory(chat, { count: 2 });
-  assert.equal(history.source, 'structured');
-  assert.deepEqual(history.plots, ['<plot>structured</plot>']);
+  assert.equal(history.source, 'structured+legacy');
+  assert.deepEqual(history.plots, ['<plot>structured</plot>', '<plot>legacy stale</plot>']);
   assert.ok(history.block.includes('<plot>structured</plot>'));
-  assert.ok(!history.block.includes('legacy stale'));
+  assert.ok(history.block.includes('legacy stale'));
   assert.ok(!history.block.includes('<note>private</note>'));
   assert.ok(!history.block.includes('<state>hidden</state>'));
 }
@@ -356,8 +349,8 @@ import {
   ];
   chat[0].extra.st_bme_plot = { version: 999, plotText: '<plot>bad</plot>' };
   const history = readPlannerPlotHistory(chat, { count: 1 });
-  assert.equal(history.source, 'empty');
-  assert.deepEqual(history.plots, []);
+  assert.equal(history.source, 'legacy');
+  assert.deepEqual(history.plots, ['<plot>legacy old</plot>']);
 }
 
 {
@@ -387,13 +380,6 @@ import {
     recallInput: 'raw input',
     boundUserFloorText: message.mes,
     injectionText: 'planner memory',
-    artifactId: 'artifact:recovered-recall',
-    turnId: 'turn:recovered',
-    inputFingerprint: 'input:recovered',
-    artifactHistoryFingerprint: 'history:recovered',
-    memoryStateFingerprint: 'memory:recovered',
-    selectedNodeIds: ['memory:one'],
-    candidateNodeIds: ['memory:one', 'memory:two'],
     createdAt: '2026-07-27T00:00:00.000Z',
   };
   const recovered = recoverStructuredPlotRecordFromPlannerRecall(message, recallRecord);
@@ -402,8 +388,6 @@ import {
     '<plot>recovered plan</plot>\n<note>recovered note</note>',
   );
   assert.deepEqual(recovered?.plotBlocks, ['<plot>recovered plan</plot>']);
-  assert.equal(recovered?.recallArtifactId, 'artifact:recovered-recall');
-  assert.equal(recovered?.recallHistoryFingerprint, 'history:recovered');
   assert.equal(
     recoverStructuredPlotRecordFromPlannerRecall(message, {
       ...recallRecord,
@@ -488,15 +472,7 @@ import {
     null,
     'one planner handoff cannot be rebound to a later generation',
   );
-  assert.equal(
-    runtime.consumePlannerTurnHandoffForGeneration(
-      'chat-a',
-      'generation-2',
-      'raw input\n\n<plot>next</plot>',
-    ),
-    null,
-    'identical text cannot override a concrete generation mismatch',
-  );
+  assert.equal(runtime.consumePlannerTurnHandoffForGeneration('chat-a', 'generation-2'), null);
   assert.equal(
     runtime.peekPlannerTurnHandoff('chat-a')?.id,
     stale.id,
@@ -535,20 +511,6 @@ import {
     rawUserInput: 'raw input',
     plannerAugmentedMessage: chat[0].mes,
     plannerPlotRecord: { plotText: '<plot>next</plot>' },
-    plannerRecall: {
-      memoryBlock: 'planner memory',
-      result: {
-        artifactId: 'artifact:recall',
-        chatId: 'integrity-chat-id',
-        turnId: 'turn:raw-input',
-        inputFingerprint: 'input:fingerprint',
-        historyFingerprint: 'history:fingerprint',
-        memoryStateFingerprint: 'memory:fingerprint',
-        selectedMemoryIds: ['memory:1'],
-        candidateMemoryIds: ['memory:1', 'memory:2'],
-        injectionText: 'planner memory',
-      },
-    },
   });
   runtime.markPlannerTurnHandoffMatched('integrity-chat-id', {
     handoffId: handoff.id,
@@ -557,9 +519,6 @@ import {
 
   assert.equal(runtime.persistPlannerTurnHandoffToUserMessage(0), true);
   assert.equal(chat[0].extra.st_bme_plot.plotText, '<plot>next</plot>');
-  assert.equal(chat[0].extra.st_bme_plot.recallArtifactId, 'artifact:recall');
-  assert.equal(chat[0].extra.st_bme_plot.recallTurnId, 'turn:raw-input');
-  assert.deepEqual(chat[0].extra.st_bme_plot.recallCandidateMemoryIds, ['memory:1', 'memory:2']);
   assert.equal(
     runtime.peekPlannerTurnHandoff('integrity-chat-id'),
     null,

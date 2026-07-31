@@ -2646,7 +2646,7 @@ export async function callLLM(systemPrompt, userPrompt, options = {}) {
 
 /**
  * 测试记忆 LLM 连通性
- * 仅测试 BME 自己配置的 Agent 模型；绝不回退到 SillyTavern 当前聊天模型。
+ * 若未配置独立记忆 LLM，则测试当前 SillyTavern 聊天模型。
  *
  * @returns {Promise<{success: boolean, mode: string, error: string}>}
  */
@@ -2654,23 +2654,17 @@ export async function testLLMConnection() {
   const config = getMemoryLLMConfig();
   const mode = hasDedicatedLLMConfig(config)
     ? `dedicated:${config.llmProviderLabel || config.llmTransportLabel || config.model}:${config.model}`
-    : "dedicated-memory-llm-required";
+    : "sillytavern-current-model";
 
   try {
-    const response = await callBmeAgentModel({
-      messages: [
-        {
-          role: "system",
-          content: "你是一个连接测试助手。请只回答 OK。",
-        },
-        { role: "user", content: "请只回复 OK" },
-      ],
-      toolChoice: "none",
-      maxCompletionTokens: 16,
-      taskType: "diagnostic",
-      requestSource: "diagnostic:test-bme-agent-connection",
-    });
-    if (typeof response?.content === "string" && response.content.trim().length > 0) {
+    const response = await callLLM(
+      "你是一个连接测试助手。请只回答 OK。",
+      "请只回复 OK",
+      {
+        requestSource: "diagnostic:test-connection",
+      },
+    );
+    if (typeof response === "string" && response.trim().length > 0) {
       return { success: true, mode, error: "" };
     }
     return { success: false, mode, error: "API 返回空结果" };

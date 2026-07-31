@@ -821,8 +821,8 @@
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">记忆 LLM</div>
-                      <div class="bme-config-card-subtitle" data-i18n="panel.agent.modelHelp">
-                        BME Agent 独立使用这里配置的模型，不会借用当前聊天模型或 DOA 的 Agent 模型。
+                      <div class="bme-config-card-subtitle">
+                        留空时复用当前聊天模型；填写后会自动识别常见渠道，未识别时按自定义 OpenAI 兼容接口处理。
                       </div>
                     </div>
                   </div>
@@ -875,8 +875,8 @@
                       placeholder="https://api.openai.com/v1"
                     />
                   </div>
-                  <div class="bme-config-help" id="bme-memory-llm-provider-help" data-i18n="panel.agent.providerHelp">
-                    Memory Steward、召回 Agent 与 ENA 共享这套 BME 专用连接。支持 OpenAI 兼容渠道、Anthropic Claude、Google AI Studio / Gemini。
+                  <div class="bme-config-help" id="bme-memory-llm-provider-help">
+                    留空时复用当前聊天模型。支持自动识别 OpenAI 兼容渠道、Anthropic Claude、Google AI Studio / Gemini；填写完整 endpoint 时会自动规整为可复用的 base URL。
                   </div>
                   <div class="bme-config-row">
                     <label for="bme-setting-llm-key">LLM API Key</label>
@@ -912,24 +912,6 @@
                     >
                       <option value="">从拉取结果中选择模型</option>
                     </select>
-                  </div>
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title" data-i18n="panel.agent.guardTitle">Agent 运行边界</div>
-                      <div class="bme-config-card-subtitle" data-i18n="panel.agent.guardHelp">上下文按 token 自动压缩；工具次数与运行时间只用于阻止后台任务失控。</div>
-                    </div>
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-agent-context-window-tokens" data-i18n="panel.agent.contextWindow">上下文窗口（tokens）</label>
-                    <input id="bme-setting-agent-context-window-tokens" class="bme-config-input" type="number" min="1024" step="1024" />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-agent-max-tool-calls" data-i18n="panel.agent.maxTools">后台任务工具调用上限</label>
-                    <input id="bme-setting-agent-max-tool-calls" class="bme-config-input" type="number" min="1" step="1" />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-agent-max-run-minutes" data-i18n="panel.agent.maxMinutes">后台任务运行上限（分钟）</label>
-                    <input id="bme-setting-agent-max-run-minutes" class="bme-config-input" type="number" min="1" step="1" />
                   </div>
                   <div class="bme-config-actions">
                     <button

@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import { HistoryTransactionService } from "../application/history-transaction-service.js";
 import { createEmptyMemoryLedger } from "../domain/memory-contract.js";
-import {
-  reconcileMemoryLedgerHistory,
-  resolveHistoryTurn,
-} from "../domain/history-reconciliation.js";
+import { reconcileMemoryLedgerHistory } from "../domain/history-reconciliation.js";
 import { appendMemoryLedgerTransaction } from "../domain/memory-ledger.js";
 import { materializeMemoryLedger } from "../domain/memory-materializer.js";
 import { createMemoryRevision } from "../domain/memory-records.js";
@@ -185,32 +182,5 @@ await assert.rejects(
   /belongs to another chat/,
 );
 assert.equal(crossChatWriteAttempted, false);
-
-// Foreground Recall/ENA must be able to address the user turn before its
-// assistant reply exists. The eventual evidence uses the exact same turn id.
-const pendingChatId = "chat:pending-turn";
-const pendingUser = user("Remember the lantern.", "pending-u1");
-const beforeReply = buildConversationEvidenceSnapshot([greeting, pendingUser], {
-  chatId: pendingChatId,
-  hostChatId: "pending.jsonl",
-});
-let pendingLedger = createEmptyMemoryLedger({ chatId: pendingChatId, now: 60 });
-const pendingTurn = resolveHistoryTurn(pendingLedger, beforeReply.turns, {
-  userFloor: 1,
-  userMessage: pendingUser.mes,
-  now: 60,
-});
-assert.equal(pendingTurn.pending, true);
-const afterReply = buildConversationEvidenceSnapshot(
-  [greeting, pendingUser, assistant("The lantern is lit.", "pending-a1")],
-  { chatId: pendingChatId, hostChatId: "pending.jsonl" },
-);
-const completedTurn = resolveHistoryTurn(pendingLedger, afterReply.turns, {
-  userFloor: 1,
-  userMessage: pendingUser.mes,
-  now: 61,
-});
-assert.equal(completedTurn.pending, false);
-assert.equal(completedTurn.turnId, pendingTurn.turnId);
 
 console.log("memory history reconciliation tests passed");

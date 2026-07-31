@@ -7,7 +7,6 @@ import {
   bumpPersistedRecallGenerationCount,
   readPersistedRecallFromUserMessage,
   resolveFinalRecallInjectionSource,
-  validatePersistedRecallArtifactBinding,
   validatePersistedRecallForUserMessage,
   writePersistedRecallToUserMessage,
 } from "../retrieval/recall-persistence.js";
@@ -23,7 +22,6 @@ const emptyRecord = buildPersistedRecallRecord({
   recallSource: "recall-agent",
   boundUserFloorText: "First turn",
   historyFingerprint,
-  artifactHistoryFingerprint: "ledger-history:first",
   artifactId: "artifact:empty",
   turnId: "turn:first",
   inputFingerprint: "input:first",
@@ -38,7 +36,6 @@ assert.equal(loadedEmpty.empty, true);
 assert.equal(loadedEmpty.injectionText, "");
 assert.equal(loadedEmpty.artifactId, "artifact:empty");
 assert.equal(validatePersistedRecallForUserMessage(chat, 0).valid, true);
-assert.equal(validatePersistedRecallArtifactBinding(loadedEmpty).valid, true);
 assert.equal(bumpPersistedRecallGenerationCount(chat, 0).generationCount, 1);
 assert.throws(
   () => buildPersistedRecallRecord({ injectionText: "" }),
@@ -108,7 +105,6 @@ const ensured = finalRecall.ensurePersistedRecallRecordForGeneration({
     artifactId: "artifact:first-floor",
     turnId: "turn:first-floor",
     inputFingerprint: "input:first-floor",
-    historyFingerprint: "ledger-history:first-floor",
     memoryStateFingerprint: "memory:none",
     recallInput: "No prior memory",
     source: "recall-agent",
@@ -117,9 +113,5 @@ const ensured = finalRecall.ensurePersistedRecallRecordForGeneration({
 assert.equal(ensured.persisted, true);
 assert.equal(finalChat[0].extra.bme_recall.status, BME_RECALL_STATUS.EMPTY);
 assert.equal(finalChat[0].extra.bme_recall.artifactId, "artifact:first-floor");
-assert.equal(
-  finalChat[0].extra.bme_recall.artifactHistoryFingerprint,
-  "ledger-history:first-floor",
-);
 
 console.log("empty recall persistence tests passed");

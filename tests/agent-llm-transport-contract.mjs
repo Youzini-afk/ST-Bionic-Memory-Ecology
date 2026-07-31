@@ -13,14 +13,6 @@ assert.match(source, /forceNonStream:\s*true/);
 assert.match(source, /body\.max_context_tokens\s*=/);
 assert.match(source, /maxCompletionTokensIsCeiling:\s*true/);
 assert.match(source, /normalized\.toolCalls\.length\s*>\s*0/);
-assert.match(
-  source,
-  /export async function testLLMConnection\(\)[\s\S]*?callBmeAgentModel\(\{[\s\S]*?diagnostic:test-bme-agent-connection/,
-);
-assert.doesNotMatch(
-  source,
-  /export async function testLLMConnection\(\)[\s\S]*?callLLM\(/,
-);
 
 const toolCalls = normalizeOpenAICompatibleToolCalls({
   choices: [

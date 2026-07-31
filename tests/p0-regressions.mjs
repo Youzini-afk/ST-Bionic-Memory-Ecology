@@ -3616,10 +3616,6 @@ async function testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata() {
     getCurrentChatId() {
       return "chat-clear-graph";
     },
-    async archiveAllGraphMemories(options = {}) {
-      callLog.push(["archive-ledger", String(options.reason || "")]);
-      return { archivedMemoryIds: ["memory:a"], archivedRelationIds: [] };
-    },
     clearCurrentChatRecoveryAnchors(options = {}) {
       callLog.push([
         "clear-recovery-anchors",
@@ -3707,19 +3703,13 @@ async function testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata() {
   );
   assert.ok(
     callLog.some(
-      (entry) => entry[0] === "archive-ledger" && entry[1] === "manual-clear-graph",
+      (entry) =>
+        entry[0] === "save-graph" &&
+        entry[1] === "manual-clear-graph" &&
+        entry[2] === true &&
+        entry[3] === true,
     ),
-    "清空图谱必须写入 Agent 记忆账本归档事务",
-  );
-  assert.equal(
-    callLog.some((entry) => entry[0] === "set-current-graph"),
-    false,
-    "清空图谱不得直接改 compatibility graph",
-  );
-  assert.equal(
-    callLog.some((entry) => entry[0] === "save-graph"),
-    false,
-    "清空图谱的权威写入由账本投影负责",
+    "清空图谱时应显式把空图写入 metadata，避免旧恢复锚点复活",
   );
 }
 
@@ -5937,11 +5927,15 @@ async function testGenerationRecallHistoryModesUseSameBindingAcrossHooks() {
 
     assert.equal(
       harness.runRecallCalls.length,
-      0,
-      `${generationType} 在耐久产物缺失时不得重新召回`,
+      1,
+      `${generationType} 应只执行一次召回`,
     );
-    assert.equal(harness.artifactUnavailableReports.length, 1);
-    assert.deepEqual(harness.moduleInjectionCalls, [""]);
+    assert.equal(
+      harness.runRecallCalls[0].hookName,
+      "GENERATE_BEFORE_COMBINE_PROMPTS",
+    );
+    assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
+    assert.equal(harness.runRecallCalls[0].overrideUserMessage, userMessage);
   }
 }
 
@@ -7872,15 +7866,19 @@ async function testHistoryGenerationReusesPersistedRecallForStableUserFloor() {
   });
 
   assert.equal(retrieveCalls, 0);
-  assert.equal(result.status, "skipped");
-  assert.equal(result.reason, "durable-turn-artifact-unavailable");
-  assert.equal(applyCalls.length, 0);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "persisted-user-floor-reused");
+  assert.equal(result.injectionText, "persisted-memory");
+  assert.equal(applyCalls.length, 1);
+  assert.equal(applyCalls[0].recallInput.source, "persisted-user-floor");
+  assert.equal(applyCalls[0].recallInput.authoritativeInputUsed, true);
+  assert.equal(applyCalls[0].recallInput.boundUserFloorText, "稳定 user 楼层");
   assert.equal(
     readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
-    0,
+    1,
   );
-  assert.equal(metadataSaveCalls, 0);
-  assert.equal(recallUiRefreshCalls, 0);
+  assert.equal(metadataSaveCalls, 1);
+  assert.equal(recallUiRefreshCalls, 1);
 }
 
 async function testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit() {
@@ -8003,9 +8001,10 @@ async function testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdi
     deliveryMode: "immediate",
   });
 
-  assert.equal(retrieveCalls, 0);
-  assert.equal(result.status, "skipped");
-  assert.equal(result.reason, "durable-turn-artifact-unavailable");
+  assert.equal(retrieveCalls, 1);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "召回完成");
+  assert.equal(result.injectionText, "fresh:已编辑的新 user 楼层");
   assert.equal(
     readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
     0,

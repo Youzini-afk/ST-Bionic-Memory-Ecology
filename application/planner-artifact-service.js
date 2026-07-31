@@ -1,3 +1,4 @@
+import { fingerprintMaterializedMemoryState } from "../domain/memory-changeset.js";
 import { MEMORY_RECORD_KIND, TURN_ARTIFACT_KIND } from "../domain/memory-contract.js";
 import { cloneDomainValue } from "../domain/memory-id.js";
 import {
@@ -45,10 +46,8 @@ export class PlannerArtifactService {
     }
     let planned = null;
     const persisted = await this.repository.transact(chatId, (ledger) => {
-      const expected = String(expectedMemoryStateFingerprint || "").trim();
-      if (!expected) {
-        throw new TypeError("Planner artifact requires the Recall memory-state fingerprint");
-      }
+      const expected = String(expectedMemoryStateFingerprint || "").trim() ||
+        fingerprintMaterializedMemoryState(ledger);
       planned = planTurnArtifactCommit(ledger, {
         turnId,
         artifactKind: TURN_ARTIFACT_KIND.PLANNER,

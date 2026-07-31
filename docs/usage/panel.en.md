@@ -11,7 +11,7 @@ This page is split out from the [README](../../README.en.md) as a user guide to 
 - **History status**
 - **Vector status**
 - **Recent recovery**
-- **Background Memory Steward**
+- **Recent extraction**
 - **Recent persistence**
 - **Recent vector**
 - **Recent recall**
@@ -22,7 +22,7 @@ This page is split out from the [README](../../README.en.md) as a user guide to 
 The tasks page is used to observe ST-BME's background task flow in realtime.
 
 - **Pipeline overview**
-  - Independent status for Memory Steward, Recall Agent, persistence, and vectors. Background maintenance does not keep foreground recall marked as extracting.
+  - Stage status for extraction, recall, persistence, vectors, and more.
 
 - **Task timeline**
   - Timeline and stage results for recent tasks.
@@ -42,7 +42,8 @@ The tasks page is used to observe ST-BME's background task flow in realtime.
 ### Actions
 
 - **Re-extract**
-  - “Extract unprocessed” and “Re-extract range” submit durable background intents. The Steward inspects those evidence ranges and decides revisions; they do not start a legacy pipeline.
+  - `提取未处理`: only process assistant turns that have not been extracted yet.
+  - `重新提取范围`: rerun a specified range by start/end turn.
 
 - **Manual compression**
   - Compress redundant or similar memories.
@@ -63,7 +64,7 @@ The tasks page is used to observe ST-BME's background task flow in realtime.
   - Lower the priority of long-unused nodes or archive them.
 
 - **Undo recent maintenance**
-  - Compatibility entry for old maintenance logs. Agent-era revisions recover through ledger versions and evidence validity.
+  - Roll back the most recent reversible maintenance action.
 
 - **Rebuild vectors / Range rebuild / Direct re-embed**
   - Rebuild node vectors to fix recall quality or inconsistencies after switching vector models.
@@ -79,17 +80,17 @@ The tasks page is used to observe ST-BME's background task flow in realtime.
 The config page contains these workspaces:
 
 - **API config**
-  - BME's dedicated Agent model, connection test, context window, and background runaway guards.
+  - Memory LLM.
   - The default direct Embedding API / SillyTavern backend index mode.
 
 - **Feature toggles**
-  - BME, Recall Agent, ENA, cognitive/spatial memory, and probabilistic candidates. The Steward chooses reconciliation, summary, reflection, compression, and forgetting tools as needed.
+  - Main capabilities such as extraction, recall, consolidation, summary, reflection, compression, forgetting, and probabilistic recall.
   - Cloud Sync behavior. Standard ST selects OPFS / IndexedDB automatically; automatic Cloud Sync is disabled when Authority SQL or Luker chat-state is primary, while manual server backups remain optional.
   - World info filtering.
   - Hide old turns and limit rendered chat turns.
 
 - **Detailed parameters**
-  - Agent context window, default 500-tool / 8-minute background guards, recall Top-K, graph diffusion, and cognitive weights. Fixed maintenance cadence/similarity gates are no longer exposed.
+  - Extraction frequency, context window, recall Top-K, graph diffusion, cognitive weights, maintenance thresholds, and more.
 
 - **Task presets**
   - Prompt blocks, generation parameters, regex, world info, and EJS templates for each task type.
