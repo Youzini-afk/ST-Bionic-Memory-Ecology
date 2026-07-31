@@ -1,124 +1,132 @@
 # BME Agent memory architecture
 
-This document is the implementation contract for the Agent-era memory core. It
-describes the target architecture, not a compatibility layer around the legacy
-pipeline.
+This document is the implementation contract for BME's two runtime modes. It
+does not define a second memory format and it does not authorize removing the
+existing workflow product.
 
-## Authority of data
+## One memory authority, two orchestration modes
 
-The durable authority is a per-chat append-only ledger. Its records contain:
+Memory remains the current chat's graph. Its canonical persistence tier is
+selected by the existing host and storage rules:
 
-1. immutable conversation evidence;
-2. evidence invalidations caused by edit, delete, swipe, reroll, or branch;
-3. versioned objective, POV, and derived memories with explicit dependencies;
-4. versioned relations;
-5. atomic commits;
-6. durable inbox items, Agent checkpoints, and append-only Agent boundary events;
-7. immutable Recall and Planner Artifacts bound to one exact user-turn version.
+- Authority SQL when Authority is the selected primary;
+- Luker chat-state when Luker owns the chat and Authority is not primary;
+- otherwise the selected browser-local OPFS or IndexedDB store.
 
-The visible graph, timeline, cognition view, summaries, vector index, and recall
-candidate caches are materialized projections. They may be rebuilt and never
-turn a failed ledger commit into a successful save.
+Cloud Sync remains a replica of browser-local storage rather than another
+primary. The graph, processed-floor/hash state, batch and maintenance journals,
+summary state, cognition, timeline, vector state, and recall records keep their
+existing persistence and rollback semantics.
 
-## Agent roles
+`memoryRuntimeMode` changes only how work is decided and scheduled:
 
-The background Memory Steward consumes a durable per-chat inbox. It reads source
-turns and memory indexes through tools, stages a change set, validates it, and
-publishes it in one domain transaction. Extraction, consolidation, evolution,
-summary, reflection, and compression are capabilities of this one open tool
-loop, not independent mandatory LLM stages.
+- `workflow` is the default. Existing event-driven recall, extraction,
+  maintenance, ENA, reroll, and history recovery run exactly as configured.
+- `agent` lets BME's own model decide recall depth and which enabled workflow
+  capabilities a new assistant batch needs. The chosen work still executes
+  through the same graph controllers, detached working graphs, durability
+  gates, and atomic publish boundary.
 
-The Steward claims every currently runnable inbox item for a chat as one atomic
-assignment. It may search lexically and semantically, inspect exact revisions,
-relations, and evidence, and then either publish one complete change set or
-record an explicit no-change outcome. New semantic state invalidates an old
-plan; Agent journal and inbox-only commits may be rebased because they do not
-change the materialized memory view. Deferred work stays durable and is retried
-by a later wake rather than by an unbounded foreground retry loop.
+Switching modes never migrates, copies, imports, projects, or changes ownership
+of memory. Workflow settings are not legacy compatibility controls. Fixed
+cadence, surprise triggering, and one-turn delay schedule Workflow mode; all
+other capability toggles and parameters remain Agent permissions and bounds.
 
-The foreground Recall Agent receives a programmatic multi-channel candidate
-packet. It may publish immediately or query deeper through the same read tools.
-It writes exactly one turn-scoped Recall Artifact. ENA remains opt-in and uses
-that artifact; reroll reuses the parent user turn's Recall and Planner Artifacts
-without rerunning either Agent.
+## Foreground Recall Agent
 
-The candidate packet is a fast starting point rather than a retrieval boundary.
-It combines deterministic retrieval with a recent-memory tail for dirty,
-unindexed, or replay-required vector state, so recall never waits for index
-repair. Backend vector scores are used when the server returns a score,
-similarity, or distance; rank is identified honestly as a fallback when it does
-not. The Agent publishes stable memory IDs only. BME revalidates those IDs and
-formats the final injection from the current ledger projection, so generated
-text cannot become memory evidence by crossing the publish boundary.
+Deterministic retrieval first builds a multi-channel candidate packet. The
+Recall Agent may publish it immediately or use tools to:
 
-A Recall Artifact has an explicit `ready` or `empty` completion state. Empty is
-a successful, persisted outcome: first-turn recall still gets a recall card and
-ENA does not invoke recall a second time. A Planner Artifact must reference the
-Recall Artifact from the same turn and input/history fingerprint. The pair is a
-deliberate turn snapshot: unrelated later Steward evolution does not change a
-reroll, while invalidated evidence, revisions, or source artifacts invalidate
-the affected snapshot.
+1. read the frozen turn and candidate packet;
+2. search the full current graph with a new query;
+3. inspect exact active nodes;
+4. traverse graph relations;
+5. publish one validated list of stable graph node IDs.
+
+BME, not the model, formats final injection text from the selected graph nodes.
+The tool boundary re-applies the existing POV, owner, region, and cognition
+filters before a node can be read, traversed, or published. An empty selection
+is valid. Provider failure, malformed tool use, or a run guard never makes
+recall unavailable: BME falls back to the deterministic selection already
+produced for that same turn.
+
+Each recall run clones one frozen graph snapshot before its first async model or
+vector step. It never waits for a Graph Steward already working in the
+background. A Steward commit completed before the clone is visible immediately;
+one completed afterward becomes available on the next turn. This prevents a
+single injection from mixing pre-commit candidates with post-commit nodes.
+
+The existing generation transaction and user-floor recall record remain outside
+the Agent. Therefore ENA handoff, recall cards, no-new-user generation, and
+reroll reuse keep the same delivery and persistence semantics in both modes.
+Disabling LLM recall also disables the Recall Agent and leaves deterministic
+retrieval active.
+
+## Background Graph Steward
+
+In Agent mode every pending assistant batch is offered to a background Graph
+Steward instead of waiting for a fixed `extractEvery` cadence. The Steward reads
+the complete unprocessed batch, graph statistics, and the user's enabled
+capabilities, then makes one disposition:
+
+- run the existing extraction pipeline with a need-based subset of enabled
+  consolidation, hierarchical summary, reflection, compression, and forgetting;
+- or persist an explicit no-change processed-history checkpoint.
+
+The Steward cannot enable a capability the user disabled. Extraction and all
+selected follow-up work still run in the existing workflow controllers, so
+scope/POV rules, story time, task presets, vector handling, batch persistence,
+Luker behavior, Authority transactions, and background maintenance are reused
+rather than reimplemented.
+
+If the Steward model fails or exits before attempting a disposition, BME runs
+the full user-enabled workflow as a safe fallback. Once a mutating disposition
+has started, failure is recorded and never followed by a second pipeline call;
+the unadvanced batch remains pending for a later retry. This preserves memory
+coverage without risking duplicate side effects.
+
+## Agent control state is not memory state
+
+The generic Agent loop, tool registry, model protocol, token-aware context
+manager, and guards are shared infrastructure. Graph-backed Agents use a
+transient control journal for model/tool boundary ordering. It contains no
+memory mutations and is never a second memory primary. On reload, an unfinished
+decision is safely replanned from the canonical graph; committed graph work is
+already protected by the existing durable batch transaction.
+
+The append-only memory-ledger modules remain isolated infrastructure and tests.
+They are not wired as the production memory owner for either runtime mode.
 
 ## Concurrency and recovery
 
-- Inbox admission is durable before execution is woken.
-- One coordinator serializes writers for a chat; different chats may run in
-  parallel.
-- An Agent run never holds the writer lock while waiting for an LLM or a tool.
-- Commit validation checks chat identity, source evidence, and every read
-  dependency. Unrelated commits may rebase; semantic conflicts require replanning.
-- A late task may commit to its origin chat repository but may not publish into
-  another active chat's graph, UI, prompt, or message array.
-- In-flight provider streams and non-idempotent tools are not replayed after a
-  crash. Durable inbox work remains pending and resumes from the last safe
-  checkpoint.
+- A task captures the current chat lease and chat-history fingerprint before an
+  Agent model call. Every mutating tool rechecks both after the wait.
+- Chat changes, chat reloads, plugin disable, and runtime-mode changes abort
+  background Agent decisions. A late task cannot publish into the new chat.
+- Recall also remains inside the existing generation lease and abort controller.
+- The Graph Steward never mutates the graph while waiting for the model. Its
+  selected pipeline creates the same detached working graph used by workflow
+  mode and publishes only after canonical persistence accepts it.
+- An explicit no-change decision writes a reversible no-op batch journal and
+  advances processed history only after a durable graph save. Failed
+  persistence restores the prior live snapshot; a post-save history mismatch is
+  marked dirty and sent through the shared recovery path.
+- Reroll, edit, delete, swipe, branch, and history recovery remain shared graph
+  operations. They do not need mode-specific migration or reconciliation.
 
-The ledger revision is independent from the physical graph-store revision.
-Each immutable ledger record is stored under its own nested metadata key and a
-small head points to the latest commit. A write checks the physical store CAS
-and the ledger parent commit. Unrelated projection writes may advance the
-physical revision and be retried; a changed ledger head is a semantic conflict.
-This avoids rewriting the complete ledger on every turn and lets IndexedDB,
-OPFS, and the Authority module share the same atomic boundary.
+## Model ownership, context, and guards
 
-The compatibility graph projection uses stable `memoryId` and `relationId`
-identities. Sequence ranges and persistence repair floors are derived from the
-supporting turn evidence, while revision and evidence provenance remain on the
-projected records. Timeline segments are deterministic, synopsis revisions
-materialize summary entries, and POV revisions materialize cognition ownership.
-An unchanged revision keeps runtime access statistics and embeddings; a changed
-or retracted revision invalidates its vector mapping. The projection can be
-rebuilt without becoming a second source of truth.
+Agent calls use BME's configured memory model, never DOA's model. The configured
+context window drives token-aware compaction; there is no character-count cap.
+The only default runaway guards are 500 tool calls and eight minutes per Agent
+task, both configurable in BME. These guards do not limit workflow steps,
+retrieval candidates, graph size, conversation length, or the number of future
+tasks.
 
-History reconciliation compares the complete current set of assistant-turn
-evidence with the ledger. Mutable SillyTavern array indexes remain locators
-only. Delete, edit, reroll, and swipe append evidence disposition records;
-selecting an older swipe reactivates its earlier evidence instead of extracting
-it again. A branch receives a distinct chat identity, retains its lineage, and
-imports only the evidence and memory revisions valid at its cutoff.
+## Product rule
 
-## Context and limits
-
-BME model presets own the model and its context-window size. Context compaction
-is token-aware: it changes the Agent-visible projection while preserving the
-full durable journal. A provider request and every tool start are journaled
-before crossing their boundary; an interrupted boundary is suspended rather
-than replayed. Tool registrations are snapshotted for a run, so a hot reload
-cannot silently change the implementation midway through that run. There is no
-character-count cap. The only default runaway
-guards are 500 tool calls and eight minutes, both configurable in BME.
-
-## Host boundary
-
-Only `host/` knows SillyTavern event names, mutable message indexes, extension
-prompt placement, Regex, MVU, TavernHelper, Luker, group generation, or branch
-payloads. Domain and Agent code use stable chat, turn, message-version, and
-generation identities supplied by the host adapter.
-
-## Cutover rule
-
-Development may compare the old and new cores in tests, but the released
-runtime has one owner for each behavior. After product-contract parity, the old
-extraction, maintenance, recall, and history mutation paths are removed rather
-than retained as a fallback. Any old-data support is a one-time importer outside
-the live runtime.
+New Agent behavior must be introduced by composition around stable workflow
+boundaries. A phase is incomplete if it hides, disables, deletes, or bypasses an
+existing product capability merely because Agent mode can perform related work.
+Workflow mode must remain a complete product, and Agent mode must fail back to
+that complete product without changing the chat's memory authority.

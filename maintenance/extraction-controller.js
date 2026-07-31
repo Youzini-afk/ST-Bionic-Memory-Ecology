@@ -16,6 +16,16 @@ function toSafeFloor(value, fallback = null) {
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 }
 
+function throwIfSignalAborted(signal, fallbackMessage = "extraction-aborted") {
+  if (!signal?.aborted) return;
+  const error = new Error(
+    signal.reason?.message || String(signal.reason || fallbackMessage),
+    signal.reason instanceof Error ? { cause: signal.reason } : undefined,
+  );
+  error.name = "AbortError";
+  throw error;
+}
+
 function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
@@ -1736,9 +1746,17 @@ export async function executeExtractionBatchController(
 }
 
 export async function runExtractionController(runtime, options = {}) {
+  const externalSignal = options?.signal || null;
+  throwIfSignalAborted(externalSignal);
   const lockedEndFloor = toSafeFloor(options?.lockedEndFloor, null);
   const triggerSource = String(options?.triggerSource || "auto").trim() || "auto";
-  const settings = runtime.getSettings?.() || {};
+  const baseSettings = runtime.getSettings?.() || {};
+  const settings =
+    options?.settingsOverride &&
+    typeof options.settingsOverride === "object" &&
+    !Array.isArray(options.settingsOverride)
+      ? { ...baseSettings, ...options.settingsOverride }
+      : baseSettings;
   const context = runtime.getContext?.() || {};
   const chat = Array.isArray(context?.chat) ? context.chat : [];
   const plan = resolveAutoExtractionPlanController(runtime, {
@@ -1780,6 +1798,7 @@ export async function runExtractionController(runtime, options = {}) {
     runtime,
     "auto-extraction-persist-retry",
   );
+  throwIfSignalAborted(externalSignal);
   const pendingPersistMessage = pendingPersistGate
     ? formatPendingPersistenceGateMessage(runtime, "自动提取")
     : "";
@@ -1816,6 +1835,7 @@ export async function runExtractionController(runtime, options = {}) {
     }
     return;
   }
+  throwIfSignalAborted(externalSignal);
 
   if (settings.extractAutoEnabled === false) return;
 
@@ -1830,6 +1850,20 @@ export async function runExtractionController(runtime, options = {}) {
   runtime.setIsExtracting(true);
   const extractionController = runtime.beginStageAbortController("extraction");
   const extractionSignal = extractionController.signal;
+  const forwardExternalAbort = () => {
+    if (!extractionSignal.aborted) {
+      extractionController.abort(externalSignal.reason);
+    }
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      forwardExternalAbort();
+    } else {
+      externalSignal.addEventListener("abort", forwardExternalAbort, {
+        once: true,
+      });
+    }
+  }
   runtime.setLastExtractionStatus(
     "提取中",
     `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}${triggerSource !== "auto" ? ` · ${triggerSource}` : ""}`,
@@ -1854,7 +1888,7 @@ export async function runExtractionController(runtime, options = {}) {
         "提取批次未返回有效结果";
       runtime.console.warn("[ST-BME] 提取批次未返回有效结果:", message);
       runtime.notifyExtractionIssue(message);
-      return;
+      return batchResult;
     }
 
     const persistence = batchResult.batchStatus?.persistence || null;
@@ -1873,6 +1907,7 @@ export async function runExtractionController(runtime, options = {}) {
         { syncRuntime: true },
       );
     }
+    return batchResult;
   } catch (e) {
     if (runtime.isAbortError(e)) {
       runtime.setLastExtractionStatus(
@@ -1883,11 +1918,20 @@ export async function runExtractionController(runtime, options = {}) {
           syncRuntime: true,
         },
       );
-      return;
+      return {
+        success: false,
+        aborted: true,
+        error: e?.message || "提取已终止",
+      };
     }
     runtime.console.error("[ST-BME] 提取失败:", e);
     runtime.notifyExtractionIssue(e?.message || String(e) || "自动提取失败");
+    return {
+      success: false,
+      error: e?.message || String(e) || "自动提取失败",
+    };
   } finally {
+    externalSignal?.removeEventListener?.("abort", forwardExternalAbort);
     runtime.finishStageAbortController("extraction", extractionController);
     runtime.setIsExtracting(false);
   }

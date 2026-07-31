@@ -2675,6 +2675,105 @@
   flex-shrink: 0;
 }
 
+.bme-runtime-mode-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(108px, 1fr));
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--bme-border);
+  border-radius: 13px;
+  background: var(--bme-surface-container);
+}
+
+.bme-runtime-mode-switch button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: transparent;
+  color: var(--bme-on-surface-dim);
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.bme-runtime-mode-switch button:hover {
+  color: var(--bme-on-surface);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.bme-runtime-mode-switch button.is-active {
+  color: #fff;
+  background: var(--bme-primary);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--bme-primary) 28%, transparent);
+}
+
+.bme-runtime-mode-switch button:active {
+  transform: scale(0.98);
+}
+
+.bme-runtime-mode-hint {
+  max-width: 300px;
+  color: var(--bme-on-surface-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.bme-agent-runtime-settings {
+  margin-top: 14px;
+}
+
+.bme-agent-runtime-settings.is-active-mode {
+  border-color: color-mix(in srgb, var(--bme-primary) 55%, var(--bme-border));
+  box-shadow: inset 3px 0 0 var(--bme-primary);
+}
+
+.bme-agent-cadence-note {
+  display: none;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--bme-primary) 28%, var(--bme-border));
+  border-radius: 10px;
+  color: var(--bme-on-surface-dim);
+  background: color-mix(in srgb, var(--bme-primary) 7%, transparent);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+[data-memory-runtime-mode="agent"] .bme-agent-cadence-note {
+  display: block;
+}
+
+.bme-agent-runtime-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--bme-primary-dim);
+  color: var(--bme-primary);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.bme-agent-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .bme-config-launch-btn {
   display: inline-flex;
   align-items: center;
@@ -5571,6 +5670,24 @@
 
   .bme-config-workspace-actions {
     align-items: stretch;
+  }
+
+  .bme-runtime-mode-switch {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bme-runtime-mode-switch button {
+    min-height: 44px;
+  }
+
+  .bme-runtime-mode-hint {
+    max-width: none;
+    text-align: left;
+  }
+
+  .bme-agent-runtime-grid {
+    grid-template-columns: 1fr;
   }
 
   .bme-config-launch-hint {

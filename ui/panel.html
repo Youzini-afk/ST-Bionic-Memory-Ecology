@@ -739,7 +739,39 @@
                 在这里集中配置第二记忆模型、功能开关、细粒度参数、任务预设和面板主题。
               </p>
             </div>
-            <div class="bme-config-workspace-actions"></div>
+            <div class="bme-config-workspace-actions">
+              <div
+                class="bme-runtime-mode-switch"
+                id="bme-memory-runtime-mode"
+                role="group"
+                aria-label="记忆运行模式"
+                data-i18n-aria-label="panel.runtimeMode.aria"
+              >
+                <button
+                  type="button"
+                  data-memory-runtime-mode="workflow"
+                  aria-pressed="true"
+                >
+                  <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
+                  <span data-i18n="panel.runtimeMode.workflow">工作流</span>
+                </button>
+                <button
+                  type="button"
+                  data-memory-runtime-mode="agent"
+                  aria-pressed="false"
+                >
+                  <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>
+                  <span>Agent</span>
+                </button>
+              </div>
+              <div
+                class="bme-runtime-mode-hint"
+                id="bme-memory-runtime-mode-hint"
+                data-i18n="panel.runtimeMode.workflowHint"
+              >
+                按既定开关和参数运行完整记忆工作流。
+              </div>
+            </div>
           </div>
 
           <div class="bme-config-nav bme-config-nav-mobile">
@@ -1092,6 +1124,56 @@
                       <span data-i18n="panel.api.testEmbedding">测试 Embedding</span>
                     </button>
                   </div>
+                </div>
+              </div>
+
+              <div class="bme-config-card bme-agent-runtime-settings" id="bme-agent-runtime-settings">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title" data-i18n="panel.agentRuntime.title">Agent 运行边界</div>
+                    <div class="bme-config-card-subtitle" data-i18n="panel.agentRuntime.subtitle">
+                      仅在 Agent 模式使用。Agent 使用上方独立配置的 BME 记忆 LLM；未配置或模型不支持工具调用时安全回退工作流。上下文接近窗口时自动总结，工具次数与运行时间只负责阻止失控循环。
+                    </div>
+                  </div>
+                  <span class="bme-agent-runtime-badge">Agent</span>
+                </div>
+                <div class="bme-agent-runtime-grid">
+                  <div class="bme-config-row">
+                    <label for="bme-setting-agent-context-window" data-i18n="panel.agentRuntime.contextWindow">上下文窗口（tokens）</label>
+                    <input
+                      id="bme-setting-agent-context-window"
+                      class="bme-config-input"
+                      type="number"
+                      min="1"
+                      step="1024"
+                      placeholder="128000"
+                    />
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-agent-max-tool-calls" data-i18n="panel.agentRuntime.maxTools">单任务工具调用上限</label>
+                    <input
+                      id="bme-setting-agent-max-tool-calls"
+                      class="bme-config-input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="500"
+                    />
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-agent-max-run-minutes" data-i18n="panel.agentRuntime.maxMinutes">单任务运行上限（分钟）</label>
+                    <input
+                      id="bme-setting-agent-max-run-minutes"
+                      class="bme-config-input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="8"
+                    />
+                  </div>
+                </div>
+                <div class="bme-config-help" data-i18n="panel.agentRuntime.help">
+                  模式切换不会迁移或复制记忆：两种模式始终读写当前聊天的同一份图谱、同一套回退和同步数据。
                 </div>
               </div>
 
@@ -1742,6 +1824,12 @@
                 <p class="bme-config-section-desc" data-i18n="panel.configSection.advancedDesc">
                   这里承接旧设置页里的高级项。若对应功能关闭，参数会置灰并提示先到“功能开关”启用。
                 </p>
+                <div
+                  class="bme-agent-cadence-note"
+                  data-i18n="panel.runtimeMode.agentCadenceNote"
+                >
+                  Agent 会在每条新 AI 回复后于后台判断是否需要写入记忆；“每 N 条回复”“惊奇触发”和“自动提取晚一楼”仍保留给工作流模式，其他能力开关和参数继续约束 Agent 调用的同一套流程。
+                </div>
               </div>
 
               <div class="bme-stripe-section">

@@ -111,9 +111,10 @@ Then restart or refresh SillyTavern.
 1. **Open the panel** — Click "Memory Graph" in the top-left menu.
 2. **Enable the plugin** — Config → Feature toggles, confirm the main switch is on.
 3. **Configure the model** — Leave the memory LLM blank to reuse the current chat model; or fill in an independent OpenAI-compatible URL/key/model under "API config".
-4. **Configure embedding** — The direct Embedding API is the default and can connect to an independent external embedding service. You can also switch to the SillyTavern backend index, which is limited to vector sources supported by the host. Direct connections require browser CORS access.
-5. **Start chatting** — Just chat normally. Extraction runs after each AI reply, and recall runs before the next generation.
-6. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
+4. **Choose a runtime** — "Workflow" keeps the complete existing behavior; "Agent" lets BME's model choose recall depth and which enabled capabilities this turn needs while using the same chat memory. Agent mode requires a tool-capable URL and model configured in BME; it never reads DOA's model.
+5. **Configure embedding** — The direct Embedding API is the default and can connect to an independent external embedding service. You can also switch to the SillyTavern backend index, which is limited to vector sources supported by the host. Direct connections require browser CORS access.
+6. **Start chatting** — Just chat normally. Memory processing runs after each AI reply, and recall runs before the next generation.
+7. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
 
 > Minimum viable setup: enable the plugin and ensure the current chat model works. Recall quality drops noticeably when embedding is unavailable, so configure it early.
 >

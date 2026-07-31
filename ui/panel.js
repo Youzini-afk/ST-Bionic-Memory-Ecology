@@ -59,6 +59,10 @@ import {
   normalizeMaintenanceExecutionMode,
 } from "../runtime/concurrency.js";
 import {
+  MEMORY_RUNTIME_MODE,
+  normalizeMemoryRuntimeMode,
+} from "../runtime/memory-runtime-mode.js";
+import {
   formatI18nValue,
   formatUiStatusMeta,
   formatUiStatusText,
@@ -4862,6 +4866,32 @@ function _refreshMaintenanceExecutionModeUi(settings = _getSettings?.() || {}) {
   });
 }
 
+function _refreshMemoryRuntimeModeUi(settings = _getSettings?.() || {}) {
+  const mode = normalizeMemoryRuntimeMode(settings.memoryRuntimeMode);
+  const switchEl = document.getElementById("bme-memory-runtime-mode");
+  switchEl
+    ?.querySelectorAll("button[data-memory-runtime-mode]")
+    .forEach((button) => {
+      const active =
+        normalizeMemoryRuntimeMode(button.dataset.memoryRuntimeMode) === mode;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  const hint = document.getElementById("bme-memory-runtime-mode-hint");
+  if (hint) {
+    const key =
+      mode === MEMORY_RUNTIME_MODE.AGENT
+        ? "panel.runtimeMode.agentHint"
+        : "panel.runtimeMode.workflowHint";
+    hint.dataset.i18n = key;
+    hint.textContent = t(key);
+  }
+  document
+    .getElementById("bme-agent-runtime-settings")
+    ?.classList.toggle("is-active-mode", mode === MEMORY_RUNTIME_MODE.AGENT);
+  if (panelEl) panelEl.dataset.memoryRuntimeMode = mode;
+}
+
 function _getCognitionOwnerCollection(graph) {
   return typeof listKnowledgeOwners === "function" ? listKnowledgeOwners(graph) : [];
 }
@@ -7788,6 +7818,7 @@ function _refreshConfigTab() {
   const settings = _resolveAndPersistActiveLlmPreset(_getSettings?.() || {});
   const resolvedActiveLlmPreset = String(settings.llmActivePreset || "");
   _refreshPlannerLauncher();
+  _refreshMemoryRuntimeModeUi(settings);
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
@@ -8206,6 +8237,18 @@ function _refreshConfigTab() {
   _populateLlmPresetSelect(settings.llmPresets || {}, resolvedActiveLlmPreset);
   _syncLlmPresetControls(resolvedActiveLlmPreset);
   _setInputValue("bme-setting-timeout-ms", settings.timeoutMs ?? 300000);
+  _setInputValue(
+    "bme-setting-agent-context-window",
+    settings.agentContextWindowTokens ?? 128000,
+  );
+  _setInputValue(
+    "bme-setting-agent-max-tool-calls",
+    settings.agentMaxToolCalls ?? 500,
+  );
+  _setInputValue(
+    "bme-setting-agent-max-run-minutes",
+    Math.max(1, Math.round(Number(settings.agentMaxRunMs ?? 480000) / 60000)),
+  );
 
   _setInputValue("bme-setting-embed-url", settings.embeddingApiUrl || "");
   _setInputValue("bme-setting-embed-key", settings.embeddingApiKey || "");
@@ -8278,6 +8321,20 @@ function _bindConfigControls() {
     });
     btn.dataset.bmeBound = "true";
   });
+
+  const runtimeModeEl = document.getElementById("bme-memory-runtime-mode");
+  if (runtimeModeEl && runtimeModeEl.dataset.bmeBound !== "true") {
+    runtimeModeEl.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-memory-runtime-mode]");
+      if (!button) return;
+      const memoryRuntimeMode = normalizeMemoryRuntimeMode(
+        button.dataset.memoryRuntimeMode,
+      );
+      const settings = _patchSettings({ memoryRuntimeMode });
+      _refreshMemoryRuntimeModeUi(settings);
+    });
+    runtimeModeEl.dataset.bmeBound = "true";
+  }
 
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
@@ -8957,6 +9014,27 @@ function _bindConfigControls() {
   });
   bindNumber("bme-setting-timeout-ms", 300000, 1000, 3600000, (value) =>
     _patchSettings({ timeoutMs: value }),
+  );
+  bindNumber(
+    "bme-setting-agent-context-window",
+    128000,
+    1,
+    Number.MAX_SAFE_INTEGER,
+    (value) => _patchSettings({ agentContextWindowTokens: value }),
+  );
+  bindNumber(
+    "bme-setting-agent-max-tool-calls",
+    500,
+    1,
+    Number.MAX_SAFE_INTEGER,
+    (value) => _patchSettings({ agentMaxToolCalls: value }),
+  );
+  bindNumber(
+    "bme-setting-agent-max-run-minutes",
+    8,
+    1,
+    Math.floor(Number.MAX_SAFE_INTEGER / 60000),
+    (value) => _patchSettings({ agentMaxRunMs: value * 60000 }),
   );
 
   bindText("bme-setting-embed-url", (value) =>
@@ -14431,6 +14509,9 @@ function _patchSettings(patch = {}, options = {}) {
   }
   _refreshCloudStorageModeUi(settings);
   _refreshNativeRolloutStatusUi(settings);
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "memoryRuntimeMode")) {
+    _refreshMemoryRuntimeModeUi(settings);
+  }
   return settings;
 }
 

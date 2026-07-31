@@ -314,6 +314,32 @@ assert.ok(recoveryPoint);
 assert.equal(recoveryPoint.path, "reverse-journal");
 assert.equal(recoveryPoint.affectedJournals[0].processedRange[1], 3);
 
+const noChangeGraph = createEmptyGraph();
+noChangeGraph.historyState.chatId = "chat-agent-no-change";
+const noChangeBefore = cloneGraphSnapshot(noChangeGraph);
+noChangeGraph.historyState.lastProcessedAssistantFloor = 1;
+noChangeGraph.lastProcessedSeq = 1;
+noChangeGraph.historyState.processedMessageHashes = {
+  0: "user-hash",
+  1: "assistant-hash",
+};
+appendBatchJournal(
+  noChangeGraph,
+  createBatchJournalEntry(noChangeBefore, noChangeGraph, {
+    processedRange: [0, 1],
+    sourceChatIndexRange: [0, 1],
+    postProcessArtifacts: ["graph-steward-no-change"],
+  }),
+);
+const noChangeRecoveryPoint = findJournalRecoveryPoint(noChangeGraph, 1);
+assert.ok(
+  noChangeRecoveryPoint,
+  "Agent no-change checkpoints must remain reversible even without node changes",
+);
+assert.equal(noChangeRecoveryPoint.affectedJournals.length, 1);
+rollbackBatch(noChangeGraph, noChangeRecoveryPoint.affectedJournals[0]);
+assert.equal(noChangeGraph.historyState.lastProcessedAssistantFloor, -1);
+
 const truncatedCoverageGraph = createEmptyGraph();
 truncatedCoverageGraph.historyState.chatId = "chat-truncated-history-test";
 truncatedCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {

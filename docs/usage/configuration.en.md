@@ -16,6 +16,15 @@ Options:
 
 This setting **does not** translate chat content, user input, AI replies, memory nodes, recall injection text, or prompt construction. Switching the interface language does not change the memory graph or model behavior.
 
+### Memory runtime mode
+
+- **Workflow (default)** runs the complete existing recall, extraction, and maintenance flow using its configured toggles, cadence, and parameters.
+- **Agent** lets the Recall Agent decide when deeper graph queries are useful before generation, while a background Memory Steward chooses which enabled capabilities the new assistant batch needs and invokes the same workflow transactions.
+
+Both modes always use the same graph, floor rollback, Luker / Authority primary, and Cloud Sync replica for the current chat. Switching mode never migrates or duplicates memory, and existing Workflow controls are not hidden or deprecated. Agent mode reviews every new assistant reply, so `Every N replies`, surprise triggering, and one-turn extraction delay schedule Workflow mode only; every other capability toggle and parameter remains a permission or boundary for the pipelines the Agent may invoke.
+
+Agents use BME's own independently configured memory LLM, never DOA's model. Agent mode requires a BME URL and model with tool-call support; missing configuration or provider failure falls back safely to the complete Workflow. The default context window is `128000` tokens and is compacted near capacity. The only default runaway guards are `500` tool calls and `8` minutes per task, both configurable under API Config.
+
 ### Memory LLM
 
 The memory LLM is used for:
@@ -28,6 +37,7 @@ The memory LLM is used for:
 - Summary rollup.
 - Reflection.
 - ENA Planner planning.
+- Agent-mode Recall Agent and background Memory Steward work.
 
 Configuration options:
 

@@ -9,7 +9,16 @@ This contract protects the complete ST-BME product while its internals are repla
 | Entrances | The SillyTavern options entry, extensions-menu entry, and floating action button all open the same full panel. |
 | Panel | Dashboard, Tasks, Actions, Config, Graph, Cognition, and Summary remain available on desktop and mobile. Existing element IDs and action semantics stay stable until a separately approved UI redesign. |
 | Recall card | A user message can display its recalled memory and ENA plot, edit or delete the record, rerun recall, and open referenced graph content. |
-| Settings | Memory, retrieval, extraction, maintenance, prompt profiles, ENA, Cloud Sync, diagnostics, native acceleration, Luker, and Authority controls remain accessible. |
+| Settings | Workflow/Agent mode, memory, retrieval, extraction, maintenance, prompt profiles, ENA, Cloud Sync, diagnostics, native acceleration, Luker, and Authority controls remain accessible. Selecting Agent mode must not remove or hide the workflow capability controls. |
+
+## Runtime modes
+
+- `workflow` is the default and remains the complete existing product.
+- `agent` changes decision and scheduling behavior only. Both modes read and write the same per-chat graph authority, processed history, recall records, and replication state.
+- Existing Workflow controls remain available. Fixed cadence, surprise triggering, and one-turn delay schedule Workflow mode; every other toggle and parameter remains an Agent capability permission or boundary, and Agent cannot enable a capability the user disabled.
+- Recall Agent failure falls back to deterministic retrieval. A Background Steward provider failure or missing disposition falls back to the full enabled workflow. A mutating disposition that already started is never invoked a second time after failure; its batch remains pending. Neither path may silently discard a memory task.
+- Switching mode does not migrate or copy data. A task already waiting across an async boundary must revalidate its chat lease and history fingerprint before any mutation.
+- Agent calls use the BME model configuration. DOA model settings are outside BME's runtime contract.
 
 ## Conversation and generation
 
@@ -24,7 +33,7 @@ This contract protects the complete ST-BME product while its internals are repla
 - The user turn owns `message.extra.bme_recall`; ENA planning output uses `message.extra.st_bme_plot`.
 - A valid reroll reuses the parent user turn's recall after validating its bound input and history fingerprint. Reroll does not execute ENA again.
 - Replacing or deleting an assistant turn reverses that turn's graph effects before the replacement is committed. Failure leaves a durable dirty checkpoint and must not acknowledge success.
-- Extraction and recovery operate on a frozen chat snapshot. Switching chats or changing the same chat across an async boundary aborts the stale transaction.
+- Recall, extraction, and recovery operate on frozen chat/graph snapshots. Switching chats or changing the same chat across an async boundary aborts the stale transaction. Foreground recall never waits for an in-flight Steward and never mixes nodes from both sides of its commit boundary.
 - An overswipe placeholder is persisted as awaiting replacement; it is never extracted as an empty assistant turn.
 - ENA is explicitly enabled. It plans only fresh user sends from the raw user input, augments rather than replaces that input, and cannot suppress normal recall when planner recall is empty.
 - ENA planning is leased to one conversation and one unchanged input. Chat switches cancel it; ordinary planner failures fail open by sending the original text. Reroll never reads or consumes a pending planner turn.

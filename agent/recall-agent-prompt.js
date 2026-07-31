@@ -8,7 +8,7 @@ Rules:
 3. Respect objective, POV, owner, region, story-time, confidence, and knowledge boundaries. A character belief is not an objective fact and one character must not inherit another character's private memory.
 4. Include enough context to preserve continuity, but omit merely similar, redundant, obsolete, or scene-irrelevant memories.
 5. An empty selection is a valid completed recall when no stored memory helps this turn. Publish it explicitly so the result can be persisted and reused.
-6. End by calling recall_publish exactly once. If memory state changes, refresh recall_context, reconsider, and publish against the refreshed state.
+6. This run uses a frozen graph snapshot. Never wait for background maintenance; if a newer graph commit lands during recall, it becomes available on the next turn. End by calling recall_publish exactly once.
 7. Do not finish with plain text before recall_publish succeeds. The final response after publishing may only be a short private work summary.`;
 
 export function buildRecallAgentMessages({

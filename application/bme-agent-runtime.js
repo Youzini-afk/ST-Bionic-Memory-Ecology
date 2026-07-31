@@ -2,40 +2,55 @@ import { TokenAwareAgentContext } from "../agent/context-window.js";
 import { DurableAgentJournal } from "../agent/journal.js";
 import { BmeAgentLoop } from "../agent/loop.js";
 import { AgentToolRegistry } from "../agent/tool-registry.js";
-import { countBmeAgentContextTokens } from "../host/agent-token-counter.js";
-import { callBmeAgentModel } from "../llm/llm.js";
+
+async function callDefaultBmeAgentModel(request) {
+  const { callBmeAgentModel } = await import("../llm/llm.js");
+  return await callBmeAgentModel(request);
+}
+
+async function countDefaultBmeAgentContextTokens(request) {
+  const { countBmeAgentContextTokens } = await import(
+    "../host/agent-token-counter.js"
+  );
+  return await countBmeAgentContextTokens(request);
+}
 
 export function createBmeAgentRuntime({
   memoryLedgerRepository,
+  journal = null,
   settings = {},
-  model = callBmeAgentModel,
-  countTokens = countBmeAgentContextTokens,
+  model = callDefaultBmeAgentModel,
+  countTokens = countDefaultBmeAgentContextTokens,
   toolRegistry = new AgentToolRegistry(),
   now = () => Date.now(),
 } = {}) {
-  if (!memoryLedgerRepository) {
-    throw new TypeError("createBmeAgentRuntime requires memoryLedgerRepository");
+  if (!journal && !memoryLedgerRepository) {
+    throw new TypeError(
+      "createBmeAgentRuntime requires a journal or memoryLedgerRepository",
+    );
   }
-  const journal = new DurableAgentJournal({
-    repository: memoryLedgerRepository,
-    now,
-  });
+  const resolvedJournal =
+    journal ||
+    new DurableAgentJournal({
+      repository: memoryLedgerRepository,
+      now,
+    });
   const context = new TokenAwareAgentContext({ countTokens, settings });
   const loop = new BmeAgentLoop({
     model,
     toolRegistry,
-    journal,
+    journal: resolvedJournal,
     context,
     settings,
     now,
   });
   return Object.freeze({
     tools: toolRegistry,
-    journal,
+    journal: resolvedJournal,
     context,
     loop,
     run: (request) => loop.run(request),
     recoverInterruptedRuns: (chatId, options) =>
-      journal.recoverInterruptedRuns(chatId, options),
+      resolvedJournal.recoverInterruptedRuns(chatId, options),
   });
 }

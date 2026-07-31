@@ -187,6 +187,7 @@ import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
+import { runGraphStewardAgent } from "./application/graph-steward-agent.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
 import { createAutoExtractionDefer } from "./runtime/auto-extraction-defer.js";
@@ -277,6 +278,7 @@ import {
   refreshHostCapabilitySnapshot,
 } from "./host/adapter/index.js";
 import { estimateTokens, formatInjection } from "./retrieval/injector.js";
+import { reinforceAccessBatch } from "./retrieval/dynamics.js";
 import { fetchMemoryLLMModels, testLLMConnection } from "./llm/llm.js";
 import { getNodeDisplayName } from "./graph/node-labels.js";
 import { showManagedBmeNotice } from "./ui/notice.js";
@@ -331,6 +333,10 @@ import {
   mergePersistedSettings,
 } from "./runtime/settings-defaults.js";
 import {
+  isAgentMemoryRuntimeMode,
+  normalizeMemoryRuntimeMode,
+} from "./runtime/memory-runtime-mode.js";
+import {
   createBackgroundMaintenanceQueue,
   resolveConcurrencyConfig,
 } from "./runtime/concurrency.js";
@@ -347,6 +353,7 @@ import {
   recordAuthorityAcceptedRevision,
 } from "./sync/authority-browser-state.js";
 import { retrieve } from "./retrieval/retriever.js";
+import { retrieveWithGraphAgent } from "./retrieval/graph-agent-retriever.js";
 
 import {
   loadGraphFromIndexedDbImpl,
@@ -1681,9 +1688,19 @@ const conversationWorkspace = createConversationWorkspace({
   createStatus: createInitialUiStatus,
   clearTimeout,
 });
+const graphStewardWorkers = new Map();
 conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
   reason: "runtime-init",
 });
+
+function abortGraphStewardWorkers(reason = "graph-steward-aborted") {
+  for (const worker of graphStewardWorkers.values()) {
+    if (!worker.controller.signal.aborted) {
+      worker.controller.abort(createAbortError(reason));
+    }
+  }
+  graphStewardWorkers.clear();
+}
 function isConversationTargetCurrent(
   chatId,
   lease,
@@ -1916,7 +1933,8 @@ const autoExtractionDeferRuntime = createAutoExtractionDefer({
   normalizeChatIdCandidate,
   normalizeRestoreLockState: (...args) => normalizeRestoreLockState(...args),
   notifyExtractionIssue: (...args) => notifyExtractionIssue(...args),
-  resolveAutoExtractionPlan: (...args) => resolveAutoExtractionPlan(...args),
+  resolveAutoExtractionPlan: (...args) =>
+    resolveMemoryRuntimeAutoExtractionPlan(...args),
   runExtraction: (...args) => runExtraction(...args),
   setTimeout,
   AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS,
@@ -11965,6 +11983,22 @@ function resolveAutoExtractionPlan({
   );
 }
 
+function resolveMemoryRuntimeAutoExtractionPlan(options = {}) {
+  const settings = options?.settings || getSettings();
+  if (!isAgentMemoryRuntimeMode(settings?.memoryRuntimeMode)) {
+    return resolveAutoExtractionPlan(options);
+  }
+  return resolveAutoExtractionPlan({
+    ...options,
+    settings: {
+      ...settings,
+      extractEvery: 1,
+      extractAutoDelayLatestAssistant: false,
+      enableSmartTrigger: false,
+    },
+  });
+}
+
 function markDryRunPromptPreview(ttlMs = GENERATION_RECALL_HOOK_BRIDGE_MS) {
   const resolvedTtlMs = Math.max(
     100,
@@ -13932,6 +13966,20 @@ async function ensureVectorReadyIfNeeded(
   signal = undefined,
 ) {
   if (!conversationWorkspace.graph) return;
+  const activeChatId = String(getCurrentChatId() || "").trim();
+  const activeSteward = activeChatId
+    ? graphStewardWorkers.get(activeChatId)
+    : null;
+  if (
+    isAgentMemoryRuntimeMode(getSettings()?.memoryRuntimeMode) &&
+    activeSteward &&
+    !activeSteward.controller.signal.aborted
+  ) {
+    return {
+      skipped: true,
+      reason: "graph-steward-running-use-current-snapshot",
+    };
+  }
   const isBackgroundConsolidationVectorSyncPending = () => {
     if (
       String(conversationWorkspace.graph?.vectorIndexState?.dirtyReason || "") !==
@@ -14134,6 +14182,12 @@ function scheduleServerSettingsSave() {
 }
 
 function updateModuleSettings(patch = {}) {
+  const normalizedPatch = { ...(patch || {}) };
+  if (Object.prototype.hasOwnProperty.call(normalizedPatch, "memoryRuntimeMode")) {
+    normalizedPatch.memoryRuntimeMode = normalizeMemoryRuntimeMode(
+      normalizedPatch.memoryRuntimeMode,
+    );
+  }
   const vectorConfigKeys = new Set([
     "embeddingApiUrl",
     "embeddingApiKey",
@@ -14177,24 +14231,36 @@ function updateModuleSettings(patch = {}) {
     "authorityProbeIntervalMs",
   ]);
   const settings = getSettings();
+  const previousMemoryRuntimeMode = normalizeMemoryRuntimeMode(
+    settings.memoryRuntimeMode,
+  );
   const previousCloudStorageMode = String(
     settings.cloudStorageMode || "automatic",
   );
   const previousGraphLocalStorageMode = getRequestedGraphLocalStorageMode(
     settings,
   );
-  Object.assign(settings, patch);
+  Object.assign(settings, normalizedPatch);
   extension_settings[MODULE_NAME] = settings;
   globalThis.__stBmeDebugLoggingEnabled = Boolean(
     settings.debugLoggingEnabled,
   );
   saveSettingsDebounced();
 
+  const currentMemoryRuntimeMode = normalizeMemoryRuntimeMode(
+    settings.memoryRuntimeMode,
+  );
+  if (previousMemoryRuntimeMode !== currentMemoryRuntimeMode) {
+    abortRecallStageWithReason("记忆运行模式已切换");
+    abortGraphStewardWorkers("memory-runtime-mode-changed");
+  }
+
   if (
     Object.prototype.hasOwnProperty.call(patch, "enabled") &&
     patch.enabled === false
   ) {
     abortAllRunningStages();
+    abortGraphStewardWorkers("plugin-disabled");
     dismissAllStageNotices();
     try {
       applyModuleInjectionPrompt("", settings);
@@ -15515,7 +15581,7 @@ function settleExtractionStatusAfterHistoryRecovery(
 /**
  * 提取管线：处理未提取的对话楼层
  */
-async function runExtraction() {
+async function runWorkflowExtraction() {
   const options =
     arguments.length > 0 &&
     arguments[0] &&
@@ -15545,7 +15611,7 @@ async function runExtraction() {
     isAbortError,
     notifyExtractionIssue,
     recoverHistoryIfNeeded,
-    resolveAutoExtractionPlan,
+    resolveAutoExtractionPlan: resolveMemoryRuntimeAutoExtractionPlan,
     retryPendingGraphPersist,
     setIsExtracting: (value) => {
       conversationWorkspace.isExtracting = value;
@@ -15554,7 +15620,415 @@ async function runExtraction() {
   }, options);
 }
 
+function buildGraphStewardAllowedCapabilities(settings = getSettings()) {
+  return {
+    consolidate: settings.enableConsolidation !== false,
+    summarize:
+      settings.enableHierarchicalSummary !== false &&
+      settings.enableSynopsis !== false,
+    reflect: settings.enableReflection === true,
+    compress: settings.enableAutoCompression !== false,
+    forget: settings.enableSleepCycle === true,
+  };
+}
+
+function projectGraphStewardMessages(chat = [], startFloor = 0, endFloor = 0) {
+  const settings = getSettings();
+  const contextTurns = Math.max(
+    0,
+    Math.floor(Number(settings.extractContextTurns ?? 2)),
+  );
+  const contextStart = Math.max(0, Number(startFloor) - contextTurns * 2 - 2);
+  return chat
+    .slice(contextStart, Number(endFloor) + 1)
+    .map((message, offset) => {
+      const floor = contextStart + offset;
+      return {
+        floor,
+        role: message?.is_user ? "user" : "assistant",
+        name: String(message?.name || ""),
+        content: String(message?.mes || ""),
+        contextOnly: floor < Number(startFloor),
+      };
+    });
+}
+
+function assertGraphStewardContextCurrent({ lease, historyFingerprint }) {
+  if (
+    !conversationWorkspace.isLeaseCurrent(lease, { requireGeneration: false })
+  ) {
+    throw createAbortError("graph-steward-conversation-changed");
+  }
+  const currentFingerprint = buildChatHistoryFingerprint(getContext()?.chat || []);
+  if (
+    historyFingerprint &&
+    currentFingerprint &&
+    historyFingerprint !== currentFingerprint
+  ) {
+    throw createAbortError("graph-steward-history-changed");
+  }
+}
+
+async function markGraphStewardBatchWithoutChanges({
+  startFloor,
+  endFloor,
+  reason,
+  lease,
+  historyFingerprint,
+  signal,
+} = {}) {
+  if (signal?.aborted) throw signal.reason || createAbortError("graph-steward-aborted");
+  assertGraphStewardContextCurrent({ lease, historyFingerprint });
+  if (!ensureGraphMutationReady("Agent 无变更结算", { notify: false })) {
+    return { success: false, error: getGraphMutationBlockReason("Agent 无变更结算") };
+  }
+  const graph = conversationWorkspace.graph;
+  const beforeSnapshot = cloneGraphSnapshot(graph);
+  const chat = Array.isArray(getContext()?.chat) ? getContext().chat : [];
+  updateProcessedHistorySnapshot(chat, endFloor, graph);
+  appendBatchJournal(
+    graph,
+    createBatchJournalEntry(beforeSnapshot, graph, {
+      processedRange: [Number(startFloor), Number(endFloor)],
+      sourceChatIndexRange: [Number(startFloor), Number(endFloor)],
+      extractionCountBefore: Number(
+        beforeSnapshot?.historyState?.extractionCount || 0,
+      ),
+      postProcessArtifacts: ["graph-steward-no-change"],
+    }),
+  );
+  let persistResult = null;
+  try {
+    persistResult = await saveGraphToChat({
+      reason: "graph-steward-no-change",
+      awaitDurable: true,
+    });
+  } catch (error) {
+    if (conversationWorkspace.graph === graph) {
+      conversationWorkspace.graph = beforeSnapshot;
+    }
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: error?.message || String(error) || "Agent 无变更结算未持久化",
+    };
+  }
+  const accepted =
+    persistResult?.accepted === true || persistResult?.saved === true;
+  if (!accepted) {
+    if (conversationWorkspace.graph === graph) {
+      conversationWorkspace.graph = beforeSnapshot;
+    }
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: persistResult?.reason || "Agent 无变更结算未持久化",
+      persistence: persistResult || null,
+    };
+  }
+  try {
+    assertGraphStewardContextCurrent({ lease, historyFingerprint });
+  } catch (error) {
+    if (
+      String(error?.message || "") === "graph-steward-history-changed" &&
+      conversationWorkspace.graph === graph
+    ) {
+      const detection = inspectHistoryMutation(
+        "graph-steward-post-persist-history-changed",
+      );
+      if (!detection?.dirty && Number.isFinite(Number(startFloor))) {
+        markHistoryDirty(
+          graph,
+          Number(startFloor),
+          "Agent 无变更检查点完成时聊天历史已变化",
+          "graph-steward-post-persist-fence",
+        );
+        persistHistoryDirtyCheckpoint(
+          "graph-steward-post-persist-history-dirty",
+        );
+      }
+    }
+    refreshPanelLiveState();
+    throw error;
+  }
+  refreshPanelLiveState();
+  return {
+    success: true,
+    processedFloor: Number(endFloor),
+    reason: String(reason || ""),
+    persistence: persistResult,
+  };
+}
+
+async function runGraphStewardBatch({
+  lockedEndFloor = null,
+  triggerSource = "message-received",
+  signal,
+} = {}) {
+  const preflightLease = conversationWorkspace.captureLease();
+  const preflightChatId = getCurrentChatId();
+  if (!ensureGraphMutationReady("Agent 记忆任务", { notify: false })) {
+    deferAutoExtraction("graph-steward-graph-not-ready", {
+      chatId: preflightChatId,
+      targetEndFloor: lockedEndFloor,
+      strategy: "agent",
+    });
+    return {
+      success: false,
+      deferred: true,
+      reason: getGraphMutationBlockReason("Agent 记忆任务"),
+    };
+  }
+  if (conversationWorkspace.graphPersistenceState.pendingPersist === true) {
+    await retryPendingGraphPersist({
+      reason: "graph-steward-preflight-persist-retry",
+      targetChatId: preflightChatId,
+    });
+    if (signal?.aborted) {
+      throw signal.reason || createAbortError("graph-steward-aborted");
+    }
+    if (
+      !conversationWorkspace.isLeaseCurrent(preflightLease, {
+        requireGeneration: false,
+      })
+    ) {
+      throw createAbortError("graph-steward-conversation-changed");
+    }
+    if (conversationWorkspace.graphPersistenceState.pendingPersist === true) {
+      deferAutoExtraction("graph-steward-pending-persistence", {
+        chatId: preflightChatId,
+        targetEndFloor: lockedEndFloor,
+        strategy: "agent",
+      });
+      return {
+        success: false,
+        deferred: true,
+        reason: "graph-steward-pending-persistence",
+      };
+    }
+  }
+  if (!(await recoverHistoryIfNeeded("graph-steward-preflight"))) {
+    deferAutoExtraction("graph-steward-history-recovery", {
+      chatId: preflightChatId,
+      targetEndFloor: lockedEndFloor,
+      strategy: "agent",
+    });
+    return {
+      success: false,
+      deferred: true,
+      reason: "graph-steward-history-recovery-pending",
+    };
+  }
+  if (signal?.aborted) {
+    throw signal.reason || createAbortError("graph-steward-aborted");
+  }
+  if (
+    !conversationWorkspace.isLeaseCurrent(preflightLease, {
+      requireGeneration: false,
+    })
+  ) {
+    throw createAbortError("graph-steward-conversation-changed");
+  }
+  const settings = getSettings();
+  const chatId = getCurrentChatId();
+  const chat = Array.isArray(getContext()?.chat) ? getContext().chat : [];
+  const scheduleSettings = {
+    ...settings,
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: false,
+    enableSmartTrigger: false,
+  };
+  const plan = resolveAutoExtractionPlan({
+    chat,
+    settings: scheduleSettings,
+    lastProcessedAssistantFloor: getLastProcessedAssistantFloor(),
+    lockedEndFloor,
+  });
+  if (!plan?.canRun || plan.startIdx == null || plan.endIdx == null) {
+    return { success: true, skipped: true, reason: plan?.reason || "nothing-pending" };
+  }
+  const lease = conversationWorkspace.captureLease();
+  const historyFingerprint = buildChatHistoryFingerprint(chat);
+  const graph = conversationWorkspace.graph;
+  const context = {
+    chatId,
+    startFloor: plan.startIdx,
+    endFloor: plan.endIdx,
+    triggerSource,
+    historyFingerprint,
+    messages: projectGraphStewardMessages(chat, plan.startIdx, plan.endIdx),
+    graphStats: {
+      nodes: Array.isArray(graph?.nodes) ? graph.nodes.length : 0,
+      activeNodes: Array.isArray(graph?.nodes)
+        ? graph.nodes.filter((node) => node && !node.archived).length
+        : 0,
+      edges: Array.isArray(graph?.edges) ? graph.edges.length : 0,
+      batchJournalEntries: Array.isArray(graph?.batchJournal)
+        ? graph.batchJournal.length
+        : 0,
+      maintenanceJournalEntries: Array.isArray(graph?.maintenanceJournal)
+        ? graph.maintenanceJournal.length
+        : 0,
+      extractionCount: Number(graph?.historyState?.extractionCount || 0),
+      lastProcessedAssistantFloor: getLastProcessedAssistantFloor(),
+      summaryEntries: Array.isArray(graph?.summaryState?.entries)
+        ? graph.summaryState.entries.length
+        : 0,
+      activeSummaryEntries: Array.isArray(graph?.summaryState?.activeEntryIds)
+        ? graph.summaryState.activeEntryIds.length
+        : 0,
+      lastSummarizedExtractionCount: Number(
+        graph?.summaryState?.lastSummarizedExtractionCount || 0,
+      ),
+      vectorDirty: graph?.vectorIndexState?.dirty === true,
+    },
+  };
+  const allowedCapabilities = buildGraphStewardAllowedCapabilities(settings);
+  const stewardResult = await runGraphStewardAgent({
+    chatId,
+    startFloor: plan.startIdx,
+    endFloor: plan.endIdx,
+    context,
+    allowedCapabilities,
+    settings,
+    signal,
+    runPipeline: async ({ capabilities = {}, reason = "", signal: toolSignal }) => {
+      if (toolSignal?.aborted) {
+        throw toolSignal.reason || createAbortError("graph-steward-aborted");
+      }
+      assertGraphStewardContextCurrent({ lease, historyFingerprint });
+      const result = await runWorkflowExtraction({
+        lockedEndFloor: plan.endIdx,
+        triggerSource: `agent:${triggerSource}`,
+        signal: toolSignal,
+        settingsOverride: {
+          ...scheduleSettings,
+          enableConsolidation: capabilities.enableConsolidation === true,
+          enableHierarchicalSummary:
+            capabilities.enableHierarchicalSummary === true,
+          enableSynopsis: capabilities.enableSynopsis === true,
+          enableReflection: capabilities.enableReflection === true,
+          enableAutoCompression: capabilities.enableAutoCompression === true,
+          enableSleepCycle: capabilities.enableSleepCycle === true,
+        },
+      });
+      return {
+        ...(result || {}),
+        success: result?.success === true,
+        agentReason: String(reason || ""),
+      };
+    },
+    completeWithoutChanges: async ({ reason, signal: toolSignal }) =>
+      await markGraphStewardBatchWithoutChanges({
+        startFloor: plan.startIdx,
+        endFloor: plan.endIdx,
+        reason,
+        lease,
+        historyFingerprint,
+        signal: toolSignal,
+      }),
+  });
+  if (stewardResult?.success !== true) {
+    deferAutoExtraction("graph-steward-task-incomplete", {
+      chatId,
+      targetEndFloor: plan.endIdx,
+      strategy: "agent",
+    });
+  }
+  return stewardResult;
+}
+
+function runAgentExtraction(options = {}) {
+  const chatId = String(getCurrentChatId() || "").trim();
+  if (!chatId) return Promise.resolve({ success: false, reason: "missing-chat-id" });
+  const requestedEndFloor = Number.isFinite(Number(options.lockedEndFloor))
+    ? Math.floor(Number(options.lockedEndFloor))
+    : null;
+  const existing = graphStewardWorkers.get(chatId);
+  if (existing) {
+    if (
+      requestedEndFloor != null &&
+      (existing.targetEndFloor == null || requestedEndFloor > existing.targetEndFloor)
+    ) {
+      existing.targetEndFloor = requestedEndFloor;
+      existing.rerun = true;
+    }
+    return existing.promise;
+  }
+  const worker = {
+    controller: new AbortController(),
+    targetEndFloor: requestedEndFloor,
+    rerun: false,
+    promise: null,
+  };
+  worker.promise = (async () => {
+    const results = [];
+    while (!worker.controller.signal.aborted) {
+      worker.rerun = false;
+      try {
+        results.push(
+          await runGraphStewardBatch({
+            ...options,
+            lockedEndFloor: worker.targetEndFloor,
+            signal: worker.controller.signal,
+          }),
+        );
+      } catch (error) {
+        const historyChanged =
+          String(error?.message || "") === "graph-steward-history-changed";
+        if (historyChanged && !worker.controller.signal.aborted) {
+          const recovered = await recoverHistoryIfNeeded(
+            "graph-steward-history-changed",
+          );
+          if (recovered) continue;
+          return {
+            success: false,
+            deferred: true,
+            reason: "graph-steward-history-recovery-pending",
+          };
+        }
+        if (worker.controller.signal.aborted || isAbortError(error)) {
+          return {
+            success: false,
+            aborted: true,
+            reason: error?.message || "graph-steward-aborted",
+          };
+        }
+        throw error;
+      }
+      if (!worker.rerun) {
+        return results.at(-1) || { success: true, skipped: true };
+      }
+    }
+    return {
+      success: false,
+      aborted: true,
+      reason:
+        worker.controller.signal.reason?.message || "graph-steward-aborted",
+    };
+  })().finally(() => {
+    if (graphStewardWorkers.get(chatId) === worker) {
+      graphStewardWorkers.delete(chatId);
+    }
+  });
+  graphStewardWorkers.set(chatId, worker);
+  return worker.promise;
+}
+
+async function runExtraction(options = {}) {
+  return isAgentMemoryRuntimeMode(getSettings()?.memoryRuntimeMode)
+    ? await runAgentExtraction(options)
+    : await runWorkflowExtraction(options);
+}
+
 function applyRecallInjection(settings, recallInput, recentMessages, result) {
+  if (result?.meta?.retrieval?.agent?.mode === "graph-backed") {
+    reinforceAccessBatch(
+      (result?.selectedNodeIds || [])
+        .map((nodeId) => getNode(conversationWorkspace.graph, nodeId))
+        .filter(Boolean),
+    );
+  }
   const injectionResult = applyRecallInjectionController(
     settings,
     recallInput,
@@ -15687,6 +16161,35 @@ function buildRecallRetrieveOptions(settings, context) {
   };
 }
 
+async function retrieveForMemoryRuntime(request = {}) {
+  const settings = request?.settings || getSettings();
+  const agentRecallEnabled =
+    isAgentMemoryRuntimeMode(settings?.memoryRuntimeMode) &&
+    settings?.recallEnableLLM !== false &&
+    request?.options?.enableLLMRecall !== false;
+  if (!agentRecallEnabled) {
+    return await retrieve(request);
+  }
+  const chatId = String(
+    request?.options?.chatId || getCurrentChatId() || "",
+  ).trim();
+  const turnId = String(
+    request?.options?.turnId ||
+      request?.options?.recallKey ||
+      conversationWorkspace.hostGeneration?.generationId ||
+      request?.userMessage ||
+      "",
+  ).trim();
+  return await retrieveWithGraphAgent({
+    ...request,
+    options: {
+      ...(request?.options || {}),
+      chatId,
+      turnId,
+    },
+  });
+}
+
 async function runPlannerRecallForEna({
   rawUserInput,
   signal = undefined,
@@ -15715,7 +16218,7 @@ async function runPlannerRecallForEna({
       isTrivialUserInput,
       normalizeRecallInputText,
       recoverHistoryIfNeeded,
-      retrieve,
+      retrieve: retrieveForMemoryRuntime,
     },
     {
       rawUserInput,
@@ -15778,7 +16281,7 @@ async function runRecall(options = {}) {
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
       resolveRecallInput,
-      retrieve,
+      retrieve: retrieveForMemoryRuntime,
       schedulePersistedRecallMessageUiRefresh,
       setActiveRecallPromise: (value) => {
         conversationWorkspace.activeRecallPromise = value;
@@ -15802,6 +16305,7 @@ async function runRecall(options = {}) {
 
 function onChatChanged() {
   enaPlannerApi?.cancelPlanning?.("chat-changed");
+  abortGraphStewardWorkers("chat-changed");
   conversationWorkspace.hostGeneration.running = false;
   conversationWorkspace.hostGeneration.endedAt = 0;
   conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
@@ -15873,6 +16377,7 @@ function onChatChanged() {
 
 function onChatLoaded() {
   enaPlannerApi?.cancelPlanning?.("chat-loaded");
+  abortGraphStewardWorkers("chat-loaded");
   conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "chat-loaded",
   });
@@ -16310,7 +16815,7 @@ function onMessageReceived(messageId = null, type = "") {
     maybeFlushQueuedGraphPersist,
     notifyExtractionIssue,
     queueMicrotask,
-    resolveAutoExtractionPlan,
+    resolveAutoExtractionPlan: resolveMemoryRuntimeAutoExtractionPlan,
     runExtraction,
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     setPendingHostGenerationInputSnapshot: (record) => {

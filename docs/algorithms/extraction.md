@@ -6,9 +6,9 @@
 
 > `extractor.js` 头注释概括为"Mem0 精确对照 + Graphiti 时序边 + MemoRAG 全局概要"。这些技术名是灵感来源，实际实现见下，部分比原论文更简化。
 
-## 1. 自动提取计划
+## 1. 自动提取计划与运行模式
 
-`resolveAutoExtractionPlanController()` 决定是否运行：
+工作流模式下，`resolveAutoExtractionPlanController()` 决定是否运行：
 
 - 设置启用、自动提取启用（`extractAutoEnabled=true`）
 - 上次处理之后的待处理助手楼层数
@@ -17,9 +17,11 @@
 
 **触发条件**：待处理数达到 `extractEvery`（默认 1，即每条助手消息都提取），或智能触发命中。
 
+Agent 模式不使用上述固定频率、智能触发或 lag-one 调度。每条新助手回复都会在后台交给 Graph Steward；Steward 先判断本批是否有耐久信息或维护需求，再选择运行同一套提取事务，或写入可回退的无变化检查点。`extractAutoEnabled` 仍是两种模式共同的自动处理总开关，其他提取内容、上下文、Prompt 与能力参数也继续生效。
+
 ### 智能触发（`smart-trigger.js`）
 
-`enableSmartTrigger`（默认 false）启用时，给待处理消息打分：
+工作流模式中，`enableSmartTrigger`（默认 false）启用时，给待处理消息打分：
 
 | 信号 | 加分 |
 | --- | --- |
@@ -115,9 +117,9 @@ update 操作触发时序处理：
 | 参数 | 默认 | 含义 |
 | --- | --- | --- |
 | `extractAutoEnabled` | true | 自动提取 |
-| `extractEvery` | 1 | 每 N 条助手消息提取 |
+| `extractEvery` | 1 | 工作流模式每 N 条助手消息提取 |
 | `extractContextTurns` | 2 | 上下文轮数 |
-| `extractAutoDelayLatestAssistant` | false | lag-one 延迟提取 |
+| `extractAutoDelayLatestAssistant` | false | 工作流模式 lag-one 延迟提取 |
 | `extractPromptStructuredMode` | "both" | 提示词模式 |
-| `enableSmartTrigger` | false | 智能触发 |
+| `enableSmartTrigger` | false | 工作流模式智能触发 |
 | 排除标签 | think,analysis,reasoning | 提取时过滤 |

@@ -85,6 +85,7 @@ export function collectVectorTailCandidates(
 
 export async function buildRecallCandidatePacket({
   graph,
+  graphIsFrozen = false,
   userMessage = "",
   recentMessages = [],
   embeddingConfig = {},
@@ -99,7 +100,7 @@ export async function buildRecallCandidatePacket({
   }
   const candidateLimit = positiveInteger(options.candidateLimit, 36, 120);
   const tailLimit = positiveInteger(options.tailLimit, 12, 80);
-  const workingGraph = cloneDomainValue(graph, graph);
+  const workingGraph = graphIsFrozen ? graph : cloneDomainValue(graph, graph);
   const runRetrieve = typeof retrieveFn === "function"
     ? retrieveFn
     : await loadDefaultRetriever();

@@ -6,6 +6,10 @@ import {
   DEFAULT_BME_AGENT_CONTEXT_WINDOW_TOKENS,
 } from "../agent/runtime-settings.js";
 import { DEFAULT_BME_AGENT_GUARD } from "../domain/memory-contract.js";
+import {
+  MEMORY_RUNTIME_MODE,
+  normalizeMemoryRuntimeMode,
+} from "./memory-runtime-mode.js";
 
 function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   const numeric = Number(value);
@@ -19,6 +23,7 @@ const DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS = 30000;
 
 export const defaultSettings = {
   enabled: true,
+  memoryRuntimeMode: MEMORY_RUNTIME_MODE.WORKFLOW,
   debugLoggingEnabled: false,
   timeoutMs: 300000,
   hideOldMessagesEnabled: false,
@@ -328,6 +333,9 @@ export function mergePersistedSettings(loaded = {}) {
       merged[key] = compatibleLoaded[key];
     }
   }
+  merged.memoryRuntimeMode = normalizeMemoryRuntimeMode(
+    merged.memoryRuntimeMode,
+  );
   return merged;
 }
 

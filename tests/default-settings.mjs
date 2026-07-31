@@ -59,6 +59,7 @@ assert.equal(defaultSettings.injectStoryTimeLabel, true);
 assert.equal(defaultSettings.storyTimeSoftDirecting, true);
 assert.equal(defaultSettings.injectDepth, 9999);
 assert.equal(defaultSettings.enabled, true);
+assert.equal(defaultSettings.memoryRuntimeMode, "workflow");
 assert.equal(defaultSettings.debugLoggingEnabled, false);
 assert.equal(defaultSettings.agentContextWindowTokens, 128000);
 assert.equal(defaultSettings.agentMaxToolCalls, 500);
@@ -191,5 +192,14 @@ const preservedCustomHydrateThreshold = mergePersistedSettings({
 });
 assert.equal(preservedCustomHydrateThreshold.loadNativeHydrateThresholdRecords, 45000);
 assert.equal(preservedCustomHydrateThreshold.nativeRolloutVersion, 2);
+
+assert.equal(
+  mergePersistedSettings({ memoryRuntimeMode: "agent" }).memoryRuntimeMode,
+  "agent",
+);
+assert.equal(
+  mergePersistedSettings({ memoryRuntimeMode: "unknown" }).memoryRuntimeMode,
+  "workflow",
+);
 
 console.log("default-settings tests passed");
