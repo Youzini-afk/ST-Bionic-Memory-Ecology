@@ -311,6 +311,8 @@ export default {
   "recall.card.confirmDeleteShort": "确认删除？",
   "recall.card.empty.graphNotReady": "图谱未就绪",
   "recall.card.empty.noRecall": "本轮未召回到记忆",
+  "recall.card.empty.completed": "召回已完成，本轮没有相关记忆",
+  "recall.card.memoryEmpty": "无相关记忆",
   "recall.card.empty.nodesMissing": "召回节点已不存在或图谱已重建",
   "recall.card.removePlot": "移除规划",
   "recall.card.removedPlot": "已移除剧情规划",

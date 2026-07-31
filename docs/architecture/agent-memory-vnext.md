@@ -13,7 +13,8 @@ The durable authority is a per-chat append-only ledger. Its records contain:
 3. versioned objective, POV, and derived memories with explicit dependencies;
 4. versioned relations;
 5. atomic commits;
-6. durable inbox items, Agent checkpoints, and append-only Agent boundary events.
+6. durable inbox items, Agent checkpoints, and append-only Agent boundary events;
+7. immutable Recall and Planner Artifacts bound to one exact user-turn version.
 
 The visible graph, timeline, cognition view, summaries, vector index, and recall
 candidate caches are materialized projections. They may be rebuilt and never
@@ -40,6 +41,23 @@ packet. It may publish immediately or query deeper through the same read tools.
 It writes exactly one turn-scoped Recall Artifact. ENA remains opt-in and uses
 that artifact; reroll reuses the parent user turn's Recall and Planner Artifacts
 without rerunning either Agent.
+
+The candidate packet is a fast starting point rather than a retrieval boundary.
+It combines deterministic retrieval with a recent-memory tail for dirty,
+unindexed, or replay-required vector state, so recall never waits for index
+repair. Backend vector scores are used when the server returns a score,
+similarity, or distance; rank is identified honestly as a fallback when it does
+not. The Agent publishes stable memory IDs only. BME revalidates those IDs and
+formats the final injection from the current ledger projection, so generated
+text cannot become memory evidence by crossing the publish boundary.
+
+A Recall Artifact has an explicit `ready` or `empty` completion state. Empty is
+a successful, persisted outcome: first-turn recall still gets a recall card and
+ENA does not invoke recall a second time. A Planner Artifact must reference the
+Recall Artifact from the same turn and input/history fingerprint. The pair is a
+deliberate turn snapshot: unrelated later Steward evolution does not change a
+reroll, while invalidated evidence, revisions, or source artifacts invalidate
+the affected snapshot.
 
 ## Concurrency and recovery
 

@@ -189,4 +189,10 @@ assert.equal(retracted.graph.edges.length, 0);
 assert.equal(retracted.deletedNodeIds.includes("memory:meeting"), true);
 assert.equal(retracted.graph.historyState.lastProcessedAssistantFloor, -1);
 
+const otherChatLedger = createEmptyMemoryLedger({ chatId: "chat:other", now: 7 });
+retracted.graph.lastRecallResult = { marker: "must-not-cross-chat" };
+const otherChatProjection = projectMemoryLedgerToGraph(otherChatLedger, retracted.graph);
+assert.equal(otherChatProjection.graph.memoryProjection.chatId, "chat:other");
+assert.equal(otherChatProjection.graph.lastRecallResult, null);
+
 console.log("memory graph projection tests passed");

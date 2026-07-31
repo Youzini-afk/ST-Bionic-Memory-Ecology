@@ -475,6 +475,14 @@ function projectVectorState(graph, previousGraph, changedNodeIds, deletedNodeIds
 }
 
 export function projectMemoryLedgerToGraph(ledger, previousGraph = null) {
+  const previousChatId = String(
+    previousGraph?.memoryProjection?.chatId ||
+      previousGraph?.historyState?.chatId ||
+      "",
+  ).trim();
+  if (previousChatId && previousChatId !== ledger.chatId) {
+    previousGraph = null;
+  }
   const view = materializeMemoryLedger(ledger);
   const index = buildMemoryLedgerIndex(ledger);
   const graph = cloneDomainValue(previousGraph, null) || createEmptyGraph();

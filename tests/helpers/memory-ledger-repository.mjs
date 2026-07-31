@@ -12,12 +12,14 @@ export class InMemoryLedgerRepository {
     return ledger;
   }
 
-  async transact(chatId, transactionOrFactory) {
+  async transact(chatId, transactionOrFactory, { signal = null } = {}) {
+    if (signal?.aborted) throw signal.reason || new Error("transaction cancelled");
     const ledger = await this.load(chatId);
     const transaction =
       typeof transactionOrFactory === "function"
         ? await transactionOrFactory(ledger)
         : transactionOrFactory;
+    if (signal?.aborted) throw signal.reason || new Error("transaction cancelled");
     if (!transaction) {
       return { ledger, commit: null, appendedRecords: [], replayed: false, changed: false };
     }

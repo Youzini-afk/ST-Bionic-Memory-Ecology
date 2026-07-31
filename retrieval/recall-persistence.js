@@ -4,7 +4,12 @@ import { resolveGenerationParentUserFloor } from "../runtime/conversation-sessio
 import { stableHashString } from "../runtime/runtime-state.js";
 
 export const BME_RECALL_EXTRA_KEY = "bme_recall";
-export const BME_RECALL_VERSION = 2;
+export const BME_RECALL_VERSION = 3;
+
+export const BME_RECALL_STATUS = Object.freeze({
+  READY: "ready",
+  EMPTY: "empty",
+});
 
 function toIsoString(value) {
   if (typeof value === "string" && value.trim()) return value;
@@ -68,7 +73,7 @@ export function validatePersistedRecallForUserMessage(
   const record =
     cloneRecord(persistedRecord) ||
     readPersistedRecallFromUserMessage(chat, targetIndex);
-  if (!record?.injectionText) {
+  if (!record) {
     return { valid: false, reason: "no-record", record: null };
   }
   const recordVersion = Number(record.version || 1);
@@ -127,14 +132,27 @@ export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
   if (!record) return null;
 
   const injectionText = String(record.injectionText || "").trim();
-  if (!injectionText) return null;
+  const version = Number.isFinite(Number(record.version))
+    ? Number(record.version)
+    : 1;
+  const status = String(
+    record.status || (injectionText ? BME_RECALL_STATUS.READY : ""),
+  ).trim();
+  const isReady = status === BME_RECALL_STATUS.READY && Boolean(injectionText);
+  const isEmpty =
+    version >= 3 &&
+    status === BME_RECALL_STATUS.EMPTY &&
+    !injectionText;
+  if (!isReady && !isEmpty) return null;
 
   return {
-    version: Number.isFinite(Number(record.version))
-      ? Number(record.version)
-      : 1,
+    version,
+    status,
+    completed: true,
+    empty: isEmpty,
     injectionText,
     selectedNodeIds: cloneStringArray(record.selectedNodeIds),
+    candidateNodeIds: cloneStringArray(record.candidateNodeIds),
     recallInput: String(record.recallInput || ""),
     recallSource: String(record.recallSource || ""),
     hookName: String(record.hookName || ""),
@@ -148,6 +166,10 @@ export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
     authoritativeInputUsed: Boolean(record.authoritativeInputUsed),
     boundUserFloorText: String(record.boundUserFloorText || ""),
     historyFingerprint: String(record.historyFingerprint || ""),
+    artifactId: String(record.artifactId || ""),
+    turnId: String(record.turnId || ""),
+    inputFingerprint: String(record.inputFingerprint || ""),
+    memoryStateFingerprint: String(record.memoryStateFingerprint || ""),
   };
 }
 
@@ -155,11 +177,34 @@ export function buildPersistedRecallRecord(payload = {}, existingRecord = null) 
   const nowIso = toIsoString(payload.nowIso);
   const previous = cloneRecord(existingRecord) || {};
   const injectionText = String(payload.injectionText || "").trim();
+  const explicitEmpty =
+    payload.empty === true || payload.status === BME_RECALL_STATUS.EMPTY;
+  const status = String(
+    payload.status ||
+      (injectionText
+        ? BME_RECALL_STATUS.READY
+        : explicitEmpty
+          ? BME_RECALL_STATUS.EMPTY
+          : ""),
+  ).trim();
+  if (![BME_RECALL_STATUS.READY, BME_RECALL_STATUS.EMPTY].includes(status)) {
+    throw new TypeError("persisted recall requires injectionText or explicit empty completion");
+  }
+  if (status === BME_RECALL_STATUS.READY && !injectionText) {
+    throw new TypeError("ready persisted recall requires injectionText");
+  }
+  if (status === BME_RECALL_STATUS.EMPTY && injectionText) {
+    throw new TypeError("empty persisted recall cannot contain injectionText");
+  }
 
   return {
     version: BME_RECALL_VERSION,
+    status,
+    completed: true,
+    empty: status === BME_RECALL_STATUS.EMPTY,
     injectionText,
     selectedNodeIds: cloneStringArray(payload.selectedNodeIds),
+    candidateNodeIds: cloneStringArray(payload.candidateNodeIds),
     recallInput: String(payload.recallInput || ""),
     recallSource: String(payload.recallSource || ""),
     hookName: String(payload.hookName || ""),
@@ -173,6 +218,10 @@ export function buildPersistedRecallRecord(payload = {}, existingRecord = null) 
     authoritativeInputUsed: Boolean(payload.authoritativeInputUsed),
     boundUserFloorText: String(payload.boundUserFloorText || ""),
     historyFingerprint: String(payload.historyFingerprint || ""),
+    artifactId: String(payload.artifactId || ""),
+    turnId: String(payload.turnId || ""),
+    inputFingerprint: String(payload.inputFingerprint || ""),
+    memoryStateFingerprint: String(payload.memoryStateFingerprint || ""),
   };
 }
 
@@ -182,7 +231,25 @@ export function writePersistedRecallToUserMessage(chat, userMessageIndex, record
   if (!message || !message.is_user) return false;
 
   const normalized = cloneRecord(record);
-  if (!normalized || !String(normalized.injectionText || "").trim()) return false;
+  if (!normalized) return false;
+  const injectionText = String(normalized.injectionText || "").trim();
+  const status = String(
+    normalized.status || (injectionText ? BME_RECALL_STATUS.READY : ""),
+  ).trim();
+  if (status === BME_RECALL_STATUS.READY && !injectionText) return false;
+  if (status === BME_RECALL_STATUS.EMPTY && injectionText) return false;
+  if (![BME_RECALL_STATUS.READY, BME_RECALL_STATUS.EMPTY].includes(status)) {
+    return false;
+  }
+  if (
+    status === BME_RECALL_STATUS.EMPTY &&
+    Number(normalized.version || 0) < BME_RECALL_VERSION
+  ) {
+    return false;
+  }
+  normalized.status = status;
+  normalized.completed = true;
+  normalized.empty = status === BME_RECALL_STATUS.EMPTY;
 
   message.extra ||= {};
   message.extra[BME_RECALL_EXTRA_KEY] = normalized;
@@ -260,11 +327,31 @@ export function resolveFinalRecallInjectionSource({
     };
   }
 
+  if (
+    freshRecallResult?.status === "completed" &&
+    (freshRecallResult?.empty === true ||
+      freshRecallResult?.artifactStatus === BME_RECALL_STATUS.EMPTY)
+  ) {
+    return {
+      source: "fresh-empty",
+      injectionText: "",
+      record: null,
+    };
+  }
+
   const persistedInjection = String(persistedRecord?.injectionText || "").trim();
   if (persistedInjection) {
     return {
       source: "persisted",
       injectionText: persistedInjection,
+      record: persistedRecord,
+    };
+  }
+
+  if (persistedRecord?.status === BME_RECALL_STATUS.EMPTY) {
+    return {
+      source: "persisted-empty",
+      injectionText: "",
       record: persistedRecord,
     };
   }

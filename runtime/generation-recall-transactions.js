@@ -654,13 +654,12 @@ export function createGenerationRecallTransactions(deps = {}) {
       generationType:
         transaction.frozenRecallOptions?.generationType || generationType,
     };
-    // Only register a cached recall payload when the planner handoff
-    // actually carries a non-empty memory block. Otherwise the main recall
-    // would be short-circuited by an empty cached payload and produce no
-    // recall record / no recall card (see docs/features/ena-planner.md:76).
+    // A completed empty Recall Artifact is reusable too: it prevents ENA
+    // from paying for the same recall twice and still produces a recall card.
     if (
       plannerTurnHandoff?.result &&
-      String(plannerTurnHandoff.injectionText || "").trim()
+      (String(plannerTurnHandoff.injectionText || "").trim() ||
+        plannerTurnHandoff.empty === true)
     ) {
       boundRecallOptions.cachedRecallPayload = {
         handoffId: plannerTurnHandoff.id,
@@ -670,6 +669,7 @@ export function createGenerationRecallTransactions(deps = {}) {
           ? plannerTurnHandoff.recentMessages.map((item) => String(item || ""))
           : [],
         injectionText: String(plannerTurnHandoff.injectionText || ""),
+        empty: plannerTurnHandoff.empty === true,
         source: plannerTurnHandoff.source || "planner-handoff",
         sourceLabel: plannerTurnHandoff.sourceLabel || "Planner handoff",
         reason: "planner-handoff-reuse",

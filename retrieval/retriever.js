@@ -2633,6 +2633,15 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   };
 }
 
+export function buildRetrievalResultForSelectedNodes({
+  graph,
+  selectedNodeIds = [],
+  schema = [],
+  meta = {},
+} = {}) {
+  return buildResult(graph, selectedNodeIds, schema, meta);
+}
+
 function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}) {
   const buckets = {
     characterPov: [],

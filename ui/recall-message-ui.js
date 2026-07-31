@@ -4,6 +4,7 @@
 import { getContext } from "../host/st-extensions.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { t } from "../i18n/index.js";
+import { resolveRecallRecordState } from "./recall-record-state.js";
 
 function _hostUserPovAliasHintsForRecallCanvas() {
   try {
@@ -664,7 +665,50 @@ function buildRecallPane({
 
     pane.appendChild(actions);
   } else {
-    pane.appendChild(el("div", "bme-recall-empty", t("recall.card.empty.noRecall")));
+    const completedEmpty = resolveRecallRecordState(activeRecord).empty;
+    pane.appendChild(
+      el(
+        "div",
+        "bme-recall-empty",
+        t(
+          completedEmpty
+            ? "recall.card.empty.completed"
+            : "recall.card.empty.noRecall",
+        ),
+      ),
+    );
+    if (completedEmpty) {
+      const meta = el("div", "bme-recall-meta");
+      const metaText = formatMetaLine(activeRecord || {});
+      if (metaText) {
+        meta.appendChild(el("span", "bme-recall-meta-text", metaText));
+      }
+      pane.appendChild(meta);
+
+      const actions = el("div", "bme-recall-actions");
+      const deleteBtn = el("button", "bme-recall-action-btn");
+      deleteBtn.type = "button";
+      deleteBtn.innerHTML = `<span class="bme-recall-btn-icon">🗑</span> ${t("common.delete")}`;
+      setupDeleteConfirmation(deleteBtn, () => {
+        activeCallbacks.onDelete?.(messageIndex);
+      });
+      actions.appendChild(deleteBtn);
+
+      const recallBtn = el("button", "bme-recall-action-btn");
+      recallBtn.type = "button";
+      recallBtn.innerHTML = `<span class="bme-recall-btn-icon">🔄</span> ${t("recall.card.rerun")}`;
+      recallBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        setRecallButtonLoading(recallBtn, true);
+        try {
+          await activeCallbacks.onRerunRecall?.(messageIndex);
+        } finally {
+          setRecallButtonLoading(recallBtn, false);
+        }
+      });
+      actions.appendChild(recallBtn);
+      pane.appendChild(actions);
+    }
   }
 
   return pane;
@@ -698,7 +742,8 @@ export function createRecallCardElement({
   card.dataset.updatedAt = String(record?.updatedAt || "");
   card.dataset.expandedRenderSignature = "";
 
-  let hasRecall = Boolean(record?.injectionText);
+  let recallState = resolveRecallRecordState(record);
+  let hasRecall = recallState.present;
   let hasPlot = hasPlotRecordContent(plotRecord);
 
   let activeRecord = record || {};
@@ -758,6 +803,8 @@ export function createRecallCardElement({
     : 0;
   const recallBadgeText = initialNodeCount > 0
     ? t("recall.card.memoryCount", { count: initialNodeCount })
+    : recallState.empty
+      ? t("recall.card.memoryEmpty")
     : hasRecall
       ? t("recall.card.memoryReady")
       : t("recall.card.memoryCount", { count: 0 });
@@ -831,6 +878,8 @@ export function createRecallCardElement({
     if (recallBadge) {
       recallBadge.textContent = nodeCount > 0
         ? t("recall.card.memoryCount", { count: nodeCount })
+        : recallState.empty
+          ? t("recall.card.memoryEmpty")
         : hasRecall
           ? t("recall.card.memoryReady")
           : t("recall.card.memoryCount", { count: 0 });
@@ -921,7 +970,8 @@ export function createRecallCardElement({
       activeCallbacks = next.callbacks;
     }
 
-    const nextHasRecall = Boolean(activeRecord?.injectionText);
+    recallState = resolveRecallRecordState(activeRecord);
+    const nextHasRecall = recallState.present;
     const nextHasPlot = hasPlotRecordContent(activePlotRecord);
     hasRecall = nextHasRecall;
     hasPlot = nextHasPlot;

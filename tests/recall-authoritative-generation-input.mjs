@@ -298,10 +298,9 @@ testResolveRecallInputControllerAppendsSyntheticAuthoritativeUserMessage();
 // was still registered, `cachedRecallPayload` was still set, and the
 // main recall was short-circuited without running a fresh retrieval.
 //
-// Intended behaviour (docs/features/ena-planner.md:44-50,76): planner
-// and recall COEXIST via the handoff. The handoff reuses a VALID cached
-// result. When the cached result is EMPTY (empty injectionText), it
-// must fall through to a fresh recall — NOT suppress recall entirely.
+// Intended behaviour: planner and recall coexist through one durable
+// handoff. A legacy ambiguous empty payload is not trusted, while an
+// explicitly completed empty Recall Artifact is reused without a second call.
 // ═══════════════════════════════════════════════════════════════════
 
 // ─── Helper: minimal runtime for runRecallController direct invocation
@@ -466,7 +465,40 @@ async function testCachedPayloadWithEmptyInjectionTextFallsThroughToFreshRecall(
   assert.deepEqual(result.selectedNodeIds, ["node-fresh-1"]);
 }
 
-// ─── Test B: cachedRecallPayload with non-empty injectionText short-circuits (happy path, no double recall)
+// Explicitly completed empty recall short-circuits too (no double recall).
+async function testCompletedEmptyCachedPayloadShortCircuits() {
+  const chat = [{ is_user: true, mes: "completed empty turn" }];
+  const { runtime, wasRetrieveCalled } = buildPlannerHandoffControllerRuntime({
+    chat,
+    injectionText: "should-not-run",
+    selectedNodeIds: ["node-should-not-run"],
+  });
+  const result = await runRecallController(runtime, {
+    overrideUserMessage: "completed empty turn",
+    overrideSource: "planner-handoff",
+    hookName: "GENERATION_AFTER_COMMANDS",
+    cachedRecallPayload: {
+      result: {
+        injectionText: "",
+        empty: true,
+        selectedNodeIds: [],
+        stats: { coreCount: 0, recallCount: 0 },
+      },
+      injectionText: "",
+      empty: true,
+      recentMessages: [],
+      source: "planner-handoff",
+      sourceLabel: "Planner handoff",
+      reason: "planner-handoff-reused",
+    },
+  });
+  assert.equal(wasRetrieveCalled(), false);
+  assert.equal(result.status, "completed");
+  assert.equal(result.empty, true);
+  assert.equal(result.didRecall, false);
+  assert.equal(result.injectionText, "");
+}
+
 async function testCachedPayloadWithNonEmptyInjectionTextShortCircuits() {
   const chat = [{ is_user: true, mes: "规划过的用户输入" }];
   const { runtime, wasRetrieveCalled } = buildPlannerHandoffControllerRuntime({
@@ -516,8 +548,8 @@ async function testCachedPayloadWithNonEmptyInjectionTextShortCircuits() {
   assert.equal(result.reason, "planner-handoff-reused");
 }
 
-// ─── Test C: runPlannerRecallForEna nulls `result` when memoryBlock is empty (Fix 2)
-async function testPlannerRecallForEnaNullsResultOnEmptyMemoryBlock() {
+// ENA preserves a completed empty recall result in its handoff.
+async function testPlannerRecallForEnaKeepsCompletedEmptyResult() {
   const harness = await createGenerationRecallHarness();
   harness.extension_settings[MODULE_NAME] = {
     enabled: true,
@@ -540,18 +572,16 @@ async function testPlannerRecallForEnaNullsResultOnEmptyMemoryBlock() {
     rawUserInput: "查询不到任何节点的用户输入",
   });
 
-  assert.equal(recall.ok, false);
-  assert.equal(recall.reason, "empty-memory-block");
+  assert.equal(recall.ok, true);
+  assert.equal(recall.empty, true);
+  assert.equal(recall.reason, "completed-empty");
   assert.equal(recall.memoryBlock, "");
-  assert.equal(
-    recall.result,
-    null,
-    "Planner recall must null `result` when memoryBlock is empty so the handoff is not registered (Fix 2)",
-  );
+  assert.ok(recall.result);
+  assert.equal(recall.result.empty, true);
 }
 
-// ─── Test D: an empty planner recall keeps the turn mapping without suppressing fresh recall
-async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() {
+// A completed empty planner recall keeps the turn mapping and becomes reusable.
+async function testHandoffWithCompletedEmptySetsCachedRecallPayload() {
   const harness = await createGenerationRecallHarness();
   harness.extension_settings[MODULE_NAME] = {
     recallUseAuthoritativeGenerationInput: true,
@@ -562,6 +592,7 @@ async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() 
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
+      empty: true,
       memoryBlock: "",
       recentMessages: ["[user]: planner 原始输入"],
       result: {
@@ -576,6 +607,7 @@ async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() 
 
   assert.ok(handoff, "plot data keeps the planner turn mapping alive");
   assert.equal(handoff.injectionText, "");
+  assert.equal(handoff.empty, true);
 
   const recallContext = harness.result.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
@@ -589,11 +621,8 @@ async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() 
 
   assert.equal(recallContext.shouldRun, true);
   assert.equal(recallContext.recallOptions.overrideUserMessage, "planner 原始输入");
-  assert.equal(
-    recallContext.recallOptions.cachedRecallPayload,
-    undefined,
-    "cachedRecallPayload must NOT be set when handoff injectionText is empty (Fix 3)",
-  );
+  assert.ok(recallContext.recallOptions.cachedRecallPayload);
+  assert.equal(recallContext.recallOptions.cachedRecallPayload.empty, true);
 }
 
 // ─── Test E: happy path — handoff with non-empty injectionText still sets cachedRecallPayload
@@ -647,8 +676,8 @@ async function testHandoffWithNonEmptyInjectionTextSetsCachedRecallPayload() {
   );
 }
 
-// ─── Test F: regression — fresh recall produces a persistable record (hasRecall would be true)
-async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
+// A completed empty handoff persists a recall-card record after floor binding.
+async function testCompletedEmptyHandoffProducesPersistableRecord() {
   const harness = await createGenerationRecallHarness({ realApplyFinal: true });
   harness.extension_settings[MODULE_NAME] = {
     ...defaultSettings,
@@ -658,14 +687,13 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
   };
   harness.chat = [{ is_user: true, mes: "稳定 chat tail" }];
 
-  // Simulate the bug scenario: planner prepared a handoff with empty
-  // memoryBlock. After Fixes 1+3, createGenerationRecallContext does NOT
-  // set cachedRecallPayload, so the main recall falls through to the
-  // harness's `runRecall` mock which returns a non-empty injectionText.
+  // The planner completed recall with an empty result. The generation path
+  // consumes that exact result once and persists the completion marker.
   harness.result.preparePlannerTurnHandoff({
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
+      empty: true,
       memoryBlock: "",
       recentMessages: ["[user]: planner 原始输入"],
       result: {
@@ -682,18 +710,33 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
     at: Date.now(),
     source: "dom-intent",
   };
+  harness.runRecall = async (options = {}) => {
+    harness.runRecallCalls.push({ ...options });
+    assert.equal(options.cachedRecallPayload?.empty, true);
+    return {
+      status: "completed",
+      ok: true,
+      didRecall: false,
+      empty: true,
+      injectionText: "",
+      selectedNodeIds: [],
+      source: "planner-handoff",
+      recallInput: options.overrideUserMessage,
+      authoritativeInputUsed: true,
+    };
+  };
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
   assert.equal(
     harness.runRecallCalls.length,
     1,
-    "Main recall must be invoked once after empty-handoff fallthrough",
+    "The generation hook consumes the completed planner recall once",
   );
   assert.equal(
-    harness.runRecallCalls[0].cachedRecallPayload,
-    undefined,
-    "cachedRecallPayload must not be passed to runRecall when handoff injectionText is empty",
+    harness.runRecallCalls[0].cachedRecallPayload?.empty,
+    true,
+    "completed empty recall must be reused instead of recomputed",
   );
   assert.equal(
     harness.runRecallCalls[0].overrideUserMessage,
@@ -711,17 +754,10 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
     true,
     "Fresh recall must attach after MESSAGE_SENT supplies the stable user floor",
   );
-  assert.ok(
-    String(persistResult.record?.injectionText || "").trim(),
-    "Persisted record must carry non-empty injectionText",
-  );
-  // hasRecall in ui/recall-message-ui-controller.js:513 is
-  // `Boolean(record?.injectionText)` — verify that condition holds.
-  assert.equal(
-    Boolean(persistResult.record?.injectionText),
-    true,
-    "hasRecall would be true (recall card displays)",
-  );
+  assert.equal(persistResult.record?.status, "empty");
+  assert.equal(persistResult.record?.completed, true);
+  assert.equal(persistResult.record?.injectionText, "");
+  // completed=true is the recall-card presence signal even with no injection.
 }
 
 async function testRerollDoesNotReadOrConsumePlannerTurnHandoff() {
@@ -815,11 +851,12 @@ async function testPlannerRecallAbortsWhenConversationChanges() {
 }
 
 await testCachedPayloadWithEmptyInjectionTextFallsThroughToFreshRecall();
+await testCompletedEmptyCachedPayloadShortCircuits();
 await testCachedPayloadWithNonEmptyInjectionTextShortCircuits();
-await testPlannerRecallForEnaNullsResultOnEmptyMemoryBlock();
-await testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload();
+await testPlannerRecallForEnaKeepsCompletedEmptyResult();
+await testHandoffWithCompletedEmptySetsCachedRecallPayload();
 await testHandoffWithNonEmptyInjectionTextSetsCachedRecallPayload();
-await testFreshRecallAfterEmptyHandoffProducesPersistableRecord();
+await testCompletedEmptyHandoffProducesPersistableRecord();
 await testRerollDoesNotReadOrConsumePlannerTurnHandoff();
 await testPlannerHandoffCannotMoveToAnotherFreshGeneration();
 await testPlannerRecallAbortsWhenConversationChanges();

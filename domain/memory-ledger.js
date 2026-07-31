@@ -211,7 +211,8 @@ function validateRecordReferences(records, index) {
     }
     if (
       record.kind === MEMORY_RECORD_KIND.MEMORY_REVISION ||
-      record.kind === MEMORY_RECORD_KIND.RELATION_REVISION
+      record.kind === MEMORY_RECORD_KIND.RELATION_REVISION ||
+      record.kind === MEMORY_RECORD_KIND.TURN_ARTIFACT
     ) {
       for (const evidenceId of record.evidenceIds || []) {
         if (available.get(evidenceId)?.kind !== MEMORY_RECORD_KIND.EVIDENCE) {
@@ -227,7 +228,24 @@ function validateRecordReferences(records, index) {
           issues.push(`${record.id} references missing revision ${revisionId}`);
         }
       }
-      if (record.parentRevisionId) {
+      if (record.kind === MEMORY_RECORD_KIND.TURN_ARTIFACT) {
+        for (const sourceArtifactId of record.sourceArtifactIds || []) {
+          const sourceArtifact = available.get(sourceArtifactId);
+          if (sourceArtifact?.kind !== MEMORY_RECORD_KIND.TURN_ARTIFACT) {
+            issues.push(`${record.id} references missing turn artifact ${sourceArtifactId}`);
+          } else if (sourceArtifact.turnId !== record.turnId) {
+            issues.push(`${record.id} references a turn artifact from another turn`);
+          } else if (
+            record.artifactKind === "planner" &&
+            (sourceArtifact.artifactKind !== "recall" ||
+              sourceArtifact.inputFingerprint !== record.inputFingerprint ||
+              sourceArtifact.historyFingerprint !== record.historyFingerprint)
+          ) {
+            issues.push(`${record.id} references a recall artifact from another turn version`);
+          }
+        }
+      }
+      if (record.kind !== MEMORY_RECORD_KIND.TURN_ARTIFACT && record.parentRevisionId) {
         const parent = available.get(record.parentRevisionId);
         if (parent?.kind !== record.kind) {
           issues.push(`${record.id} references invalid parent ${record.parentRevisionId}`);

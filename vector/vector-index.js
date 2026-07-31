@@ -1,6 +1,7 @@
 // ST-BME: 向量模式、后端索引与直连兜底
 
 import { getRequestHeaders } from "../host/st-script.js";
+import { parseBackendVectorQueryResponse } from "./backend-query-result.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "../graph/graph.js";
 import { describeMemoryScope, normalizeMemoryScope } from "../graph/memory-scope.js";
@@ -1741,24 +1742,22 @@ export async function findSimilarNodesByText(
     const parseStartedAt = nowMs();
     const data = await response.json().catch(() => ({ hashes: [] }));
     const parseMs = nowMs() - parseStartedAt;
-    const hashes = Array.isArray(data?.hashes) ? data.hashes : [];
     const nodeIdByHash = graph.vectorIndexState?.hashToNodeId || {};
     const allowedIds = new Set(candidateNodes.map((node) => node.id));
-
-    const results = hashes
-      .map((hash, index) => ({
-        nodeId: nodeIdByHash[hash],
-        score: Math.max(0.01, 1 - index / Math.max(1, hashes.length)),
-      }))
-      .filter((entry) => entry.nodeId && allowedIds.has(entry.nodeId))
-      .slice(0, topK);
+    const parsed = parseBackendVectorQueryResponse(data, {
+      nodeIdByHash,
+      allowedIds,
+      topK,
+    });
+    const results = parsed.results;
     recordSearchTimings({
       success: true,
       reason: "ok",
       requestMs: roundMs(requestMs),
       parseMs: roundMs(parseMs),
       resultCount: results.length,
-      hashCount: hashes.length,
+      hashCount: parsed.hashCount,
+      scoreSource: parsed.scoreSource,
     });
     return results;
   } catch (error) {

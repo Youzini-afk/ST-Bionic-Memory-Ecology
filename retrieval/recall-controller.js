@@ -61,6 +61,7 @@ function buildPersistedRecallReuseResult(record = {}) {
     : [];
   return {
     injectionText: String(record?.injectionText || "").trim(),
+    empty: record?.status === "empty" || record?.empty === true,
     selectedNodeIds,
     stats: {
       coreCount: 0,
@@ -82,7 +83,7 @@ function buildPersistedRecallReuseResult(record = {}) {
           resolvedSelectedNodeIds: selectedNodeIds,
           fallbackReason: "",
           fallbackType: "",
-          emptySelectionAccepted: false,
+          emptySelectionAccepted: record?.status === "empty" || record?.empty === true,
           candidateKeyMapPreview: {},
           legacySelectionUsed: false,
           candidatePool: 0,
@@ -351,7 +352,7 @@ export function applyRecallInjectionController(
   const deliveryMode =
     String(recallInput?.deliveryMode || "immediate").trim() || "immediate";
 
-  if (injectionText && !isPersistedReuse) {
+  if ((injectionText || result?.empty === true) && !isPersistedReuse) {
     const tokens = runtime.estimateTokens(injectionText);
     debugLog(
       `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
@@ -560,11 +561,10 @@ export async function runRecallController(runtime, options = {}) {
       ? options.cachedRecallPayload
       : null;
 
-  // Never let an empty planner cache suppress fresh recall or its persisted
-  // recall card.
   if (
     cachedRecallPayload?.result &&
-    String(cachedRecallPayload.injectionText || "").trim()
+    (String(cachedRecallPayload.injectionText || "").trim() ||
+      cachedRecallPayload.empty === true)
   ) {
     runtime.setPendingRecallSendIntent?.(runtime.createRecallInputRecord());
     const cachedResult = cachedRecallPayload.result;
@@ -582,6 +582,8 @@ export async function runRecallController(runtime, options = {}) {
       reason: cachedRecallPayload.reason || "planner-handoff-reused",
       selectedNodeIds: cachedResult.selectedNodeIds || [],
       injectionText: applied?.injectionText || "",
+      empty: cachedRecallPayload.empty === true,
+      didRecall: cachedRecallPayload.empty !== true,
       retrievalMeta: applied?.retrievalMeta || {},
       llmMeta: applied?.llmMeta || {},
       transport: applied?.transport || {

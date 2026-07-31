@@ -393,7 +393,14 @@ export function createRerollRecallInput(deps = {}) {
             "",
         )
       : "";
-    const result = injectionText ? rawResult : null;
+    const completedEmpty = Boolean(plannerRecall?.empty && rawResult);
+    const result = injectionText || completedEmpty
+      ? {
+          ...rawResult,
+          injectionText,
+          empty: completedEmpty,
+        }
+      : null;
     const plotText = normalizeRecallInputText(plannerPlotRecord?.plotText || "");
     const normalizedPlotRecord = plotText
       ? {
@@ -424,6 +431,7 @@ export function createRerollRecallInput(deps = {}) {
         ? plannerRecall.recentMessages.map((item) => String(item || ""))
         : [],
       injectionText,
+      empty: completedEmpty,
       plannerPlotRecord: normalizedPlotRecord,
       source: "planner-handoff",
       sourceLabel: "Planner handoff",
@@ -464,7 +472,7 @@ export function createRerollRecallInput(deps = {}) {
     let wroteRecall = false;
     if (
       recallWasMatched &&
-      injectionText &&
+      (injectionText || handoff?.empty === true) &&
       result &&
       !deps.readPersistedRecallFromUserMessage?.(chat, newUserMessageIndex)
     ) {
@@ -474,6 +482,7 @@ export function createRerollRecallInput(deps = {}) {
           newUserMessageIndex,
           deps.buildPersistedRecallRecord?.({
             injectionText,
+            empty: handoff?.empty === true,
             selectedNodeIds: result?.selectedNodeIds || [],
             recallInput: String(handoff.rawUserInput || ""),
             recallSource: String(handoff.source || "planner-handoff"),

@@ -50,7 +50,9 @@ export function createFinalRecallInjection(deps = {}) {
       },
       existingRecord,
     );
-    if (!String(record?.injectionText || "").trim()) return null;
+    if (!record?.completed && !String(record?.injectionText || "").trim()) {
+      return null;
+    }
     if (
       !deps.writePersistedRecallToUserMessage(
         chat,
@@ -119,13 +121,20 @@ export function createFinalRecallInjection(deps = {}) {
       resolvedTargetIndex,
       {
         injectionText,
+        empty: result?.empty === true,
         selectedNodeIds: result?.selectedNodeIds || [],
+        candidateNodeIds:
+          result?.candidateMemoryIds || result?.candidateNodeIds || [],
         recallInput: String(recallInput?.userMessage || ""),
         recallSource: String(recallInput?.source || ""),
         hookName: String(recallInput?.hookName || ""),
         tokenEstimate,
         manuallyEdited: false,
         authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+        artifactId: String(result?.artifactId || ""),
+        turnId: String(result?.turnId || ""),
+        inputFingerprint: String(result?.inputFingerprint || ""),
+        memoryStateFingerprint: String(result?.memoryStateFingerprint || ""),
       },
     );
     if (!persisted) {
@@ -160,10 +169,10 @@ export function createFinalRecallInjection(deps = {}) {
     stableTargetUserMessageIndex = null,
   } = {}) {
     const injectionText = String(recallResult?.injectionText || "").trim();
+    const isCompletedEmpty = recallResult?.empty === true;
     if (
       recallResult?.status !== "completed" ||
-      !recallResult?.didRecall ||
-      !injectionText
+      (!injectionText && !isCompletedEmpty)
     ) {
       return {
         persisted: false,
@@ -284,6 +293,7 @@ export function createFinalRecallInjection(deps = {}) {
     if (
       existingRecord &&
       String(existingRecord.injectionText || "").trim() === injectionText &&
+      Boolean(existingRecord.empty) === isCompletedEmpty &&
       deps.areRecallNodeIdListsEqual(existingRecord.selectedNodeIds, selectedNodeIds) &&
       String(existingRecord.recallInput || "").trim() &&
       existingMetadataUpToDate
@@ -301,7 +311,10 @@ export function createFinalRecallInjection(deps = {}) {
       targetUserMessageIndex,
       {
         injectionText,
+        empty: isCompletedEmpty,
         selectedNodeIds,
+        candidateNodeIds:
+          recallResult?.candidateMemoryIds || recallResult?.candidateNodeIds || [],
         recallInput: String(
           recallResult?.recallInput ||
             recallResult?.userMessage ||
@@ -327,6 +340,12 @@ export function createFinalRecallInjection(deps = {}) {
         tokenEstimate: deps.estimateTokens(injectionText),
         manuallyEdited: false,
         authoritativeInputUsed: nextAuthoritativeInputUsed,
+        artifactId: String(recallResult?.artifactId || ""),
+        turnId: String(recallResult?.turnId || ""),
+        inputFingerprint: String(recallResult?.inputFingerprint || ""),
+        memoryStateFingerprint: String(
+          recallResult?.memoryStateFingerprint || "",
+        ),
       },
     );
 
@@ -1026,6 +1045,21 @@ export function createFinalRecallInjection(deps = {}) {
         "已使用消息楼层持久化注入",
         "info",
       ));
+    } else if (
+      resolved.source === "fresh-empty" ||
+      resolved.source === "persisted-empty"
+    ) {
+      applicationMode = "empty-recall";
+      transport = deps.applyModuleInjectionPrompt("", getSettings()) || transport;
+      setLastInjectionContent("");
+      rewrite.reason = "completed-empty-recall";
+      setRuntimeStatus(
+        deps.createUiStatus(
+          "召回完成",
+          "本轮没有需要注入的相关记忆",
+          "success",
+        ),
+      );
     } else {
       transport = deps.applyModuleInjectionPrompt("", getSettings()) || transport;
       setLastInjectionContent("");
@@ -1033,7 +1067,8 @@ export function createFinalRecallInjection(deps = {}) {
     }
 
     if (
-      resolved.source === "persisted" &&
+      (resolved.source === "persisted" ||
+        resolved.source === "persisted-empty") &&
       Number.isFinite(targetUserMessageIndex)
     ) {
       deps.bumpPersistedRecallGenerationCount(chat, targetUserMessageIndex);

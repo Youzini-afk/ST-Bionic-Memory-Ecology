@@ -125,13 +125,17 @@ export async function runPlannerRecallForEnaController(runtime = {}, {
   assertRunCurrent(currentGraph);
   const memoryBlock = runtime.formatInjection(result, schema).trim();
 
-  // An empty planner recall is not reusable; the normal generation must
-  // continue through fresh recall instead of caching an empty injection.
+  const empty = !memoryBlock;
   return {
-    ok: Boolean(memoryBlock),
-    reason: memoryBlock ? "completed" : "empty-memory-block",
+    ok: true,
+    empty,
+    reason: empty ? "completed-empty" : "completed",
     memoryBlock,
     recentMessages,
-    result: memoryBlock ? result : null,
+    result: {
+      ...result,
+      injectionText: memoryBlock,
+      empty,
+    },
   };
 }

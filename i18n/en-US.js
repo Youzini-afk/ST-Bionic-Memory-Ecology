@@ -311,6 +311,8 @@ export default {
   "recall.card.confirmDeleteShort": "Delete?",
   "recall.card.empty.graphNotReady": "Graph is not ready",
   "recall.card.empty.noRecall": "No memories were recalled for this turn",
+  "recall.card.empty.completed": "Recall completed; no relevant memories were needed",
+  "recall.card.memoryEmpty": "no relevant memory",
   "recall.card.empty.nodesMissing": "Recalled nodes no longer exist or the graph was rebuilt",
   "recall.card.removePlot": "Remove Plot",
   "recall.card.removedPlot": "Plot planning removed",

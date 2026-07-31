@@ -10,7 +10,7 @@ async function loadRetrieve(stubs) {
   const source = await fs.readFile(retrieverPath, "utf8");
   const transformed = `${source
     .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\r?\n/gm, "")
-    .replace("export async function retrieve", "async function retrieve")}
+    .replace(/^export\s+(?=(?:async\s+)?function\s+)/gm, "")}
 this.retrieve = retrieve;
 `;
 

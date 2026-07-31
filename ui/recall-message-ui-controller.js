@@ -6,6 +6,7 @@ import {
   writeStructuredPlotRecordToMessage,
 } from "../ena-planner/planner-plot-history.js";
 import { t } from "../i18n/index.js";
+import { resolveRecallRecordState } from "./recall-record-state.js";
 
 export function createRecallMessageUiController(deps = {}) {
   let persistedRecallUiRefreshTimer = null;
@@ -102,6 +103,9 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
   const nowIso = new Date().toISOString();
   const nextRecord = {
     ...current,
+    status: "ready",
+    completed: true,
+    empty: false,
     injectionText: normalizedText,
     tokenEstimate: deps.estimateTokens(normalizedText),
     updatedAt: nowIso,
@@ -532,7 +536,7 @@ function refreshPersistedRecallMessageUi() {
         recoveredPlotCount += 1;
       }
     }
-    const hasRecall = Boolean(record?.injectionText);
+    const hasRecall = resolveRecallRecordState(record).present;
     const hasPlot = hasPlotRecordContent(plotRecord);
     if (!hasRecall && !hasPlot) {
       if (messageElement) {

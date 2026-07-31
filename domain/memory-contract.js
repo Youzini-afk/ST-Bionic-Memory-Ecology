@@ -16,6 +16,7 @@ export const MEMORY_RECORD_KIND = Object.freeze({
   INBOX_ITEM: "inbox_item",
   TASK_CHECKPOINT: "task_checkpoint",
   AGENT_EVENT: "agent_event",
+  TURN_ARTIFACT: "turn_artifact",
 });
 
 export const AGENT_EVENT_TYPE = Object.freeze({
@@ -66,6 +67,11 @@ export const TURN_ARTIFACT_KIND = Object.freeze({
   PLANNER: "planner",
 });
 
+export const TURN_ARTIFACT_STATUS = Object.freeze({
+  READY: "ready",
+  EMPTY: "empty",
+});
+
 export const DEFAULT_BME_AGENT_GUARD = Object.freeze({
   maxToolCalls: 500,
   maxRunMs: 8 * 60 * 1000,
@@ -86,6 +92,8 @@ const REVISION_STATUSES = new Set(Object.values(MEMORY_REVISION_STATUS));
 const INBOX_KINDS = new Set(Object.values(MEMORY_INBOX_KIND));
 const INBOX_STATUSES = new Set(Object.values(MEMORY_INBOX_STATUS));
 const AGENT_EVENT_TYPES = new Set(Object.values(AGENT_EVENT_TYPE));
+const TURN_ARTIFACT_KINDS = new Set(Object.values(TURN_ARTIFACT_KIND));
+const TURN_ARTIFACT_STATUSES = new Set(Object.values(TURN_ARTIFACT_STATUS));
 const TERMINAL_AGENT_EVENT_TYPES = new Set([
   AGENT_EVENT_TYPE.RUN_COMPLETED,
   AGENT_EVENT_TYPE.RUN_SUSPENDED,
@@ -156,6 +164,14 @@ export function isMemoryInboxStatus(value) {
 
 export function isAgentEventType(value) {
   return AGENT_EVENT_TYPES.has(String(value || ""));
+}
+
+export function isTurnArtifactKind(value) {
+  return TURN_ARTIFACT_KINDS.has(String(value || ""));
+}
+
+export function isTurnArtifactStatus(value) {
+  return TURN_ARTIFACT_STATUSES.has(String(value || ""));
 }
 
 export function isTerminalAgentEventType(value) {

@@ -5,11 +5,15 @@ import {
   MEMORY_LAYER,
   MEMORY_RECORD_KIND,
   MEMORY_REVISION_STATUS,
+  TURN_ARTIFACT_KIND,
+  TURN_ARTIFACT_STATUS,
   isMemoryInboxKind,
   isMemoryInboxStatus,
   isAgentEventType,
   isMemoryLayer,
   isMemoryRevisionStatus,
+  isTurnArtifactKind,
+  isTurnArtifactStatus,
   requireDomainId,
 } from "./memory-contract.js";
 import {
@@ -387,6 +391,94 @@ export function createAgentEvent(input = {}) {
     previousEventId,
     sourceRecordIds: normalizeStringArray(input.sourceRecordIds),
     payload,
+  };
+}
+
+export function createTurnArtifact(input = {}) {
+  const chatId = requireDomainId(input.chatId, "turnArtifact.chatId");
+  const turnId = requireDomainId(input.turnId, "turnArtifact.turnId");
+  const artifactKind = String(input.artifactKind || TURN_ARTIFACT_KIND.RECALL);
+  if (!isTurnArtifactKind(artifactKind)) {
+    throw new TypeError(`invalid turn artifact kind: ${artifactKind}`);
+  }
+  const injectionText = String(input.injectionText || "").trim();
+  const contentText = String(input.contentText ?? injectionText).trim();
+  const status = String(
+    input.status ||
+      (contentText ? TURN_ARTIFACT_STATUS.READY : TURN_ARTIFACT_STATUS.EMPTY),
+  );
+  if (!isTurnArtifactStatus(status)) {
+    throw new TypeError(`invalid turn artifact status: ${status}`);
+  }
+  if (status === TURN_ARTIFACT_STATUS.READY && !contentText) {
+    throw new TypeError("ready turn artifact requires contentText");
+  }
+  if (status === TURN_ARTIFACT_STATUS.EMPTY && contentText) {
+    throw new TypeError("empty turn artifact cannot contain contentText");
+  }
+  const inputFingerprint = requireDomainId(
+    input.inputFingerprint,
+    "turnArtifact.inputFingerprint",
+  );
+  const memoryStateFingerprint = requireDomainId(
+    input.memoryStateFingerprint,
+    "turnArtifact.memoryStateFingerprint",
+  );
+  const evidenceIds = normalizeStringArray(input.evidenceIds);
+  const dependencyRevisionIds = normalizeStringArray(input.dependencyRevisionIds);
+  const sourceArtifactIds = normalizeStringArray(input.sourceArtifactIds);
+  const selectedMemoryIds = normalizeStringArray(input.selectedMemoryIds);
+  const candidateMemoryIds = normalizeStringArray(input.candidateMemoryIds);
+  const payloadFingerprint = hashDomainValue({
+    turnId,
+    artifactKind,
+    status,
+    inputFingerprint,
+    historyFingerprint: String(input.historyFingerprint || "").trim(),
+    memoryStateFingerprint,
+    evidenceIds,
+    dependencyRevisionIds,
+    sourceArtifactIds,
+    selectedMemoryIds,
+    candidateMemoryIds,
+    contentText,
+    injectionText,
+    result: input.result || {},
+  });
+  const id = String(
+    input.id ||
+      createDomainId("turn-artifact", {
+        chatId,
+        turnId,
+        artifactKind,
+        inputFingerprint,
+        memoryStateFingerprint,
+        payloadFingerprint,
+      }),
+  );
+  return {
+    ...baseRecord(MEMORY_RECORD_KIND.TURN_ARTIFACT, {
+      ...input,
+      id,
+      chatId,
+    }),
+    turnId,
+    artifactKind,
+    status,
+    inputFingerprint,
+    historyFingerprint: String(input.historyFingerprint || "").trim(),
+    memoryStateFingerprint,
+    evidenceIds,
+    dependencyRevisionIds,
+    sourceArtifactIds,
+    selectedMemoryIds,
+    candidateMemoryIds,
+    contentText,
+    injectionText,
+    agentRunId: String(input.agentRunId || "").trim(),
+    agentTaskId: String(input.agentTaskId || "").trim(),
+    source: String(input.source || "recall-agent").trim(),
+    result: plainObject(input.result),
   };
 }
 

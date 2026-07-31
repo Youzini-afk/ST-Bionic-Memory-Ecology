@@ -194,6 +194,124 @@ export function materializeAgentRuns(ledger) {
   };
 }
 
+export function materializeTurnArtifacts(ledger) {
+  const index = buildMemoryLedgerIndex(ledger);
+  const evidence = materializeEvidenceState(ledger);
+  const memoryRevisions =
+    index.recordsByKind.get(MEMORY_RECORD_KIND.MEMORY_REVISION) || [];
+  const relationRevisions =
+    index.recordsByKind.get(MEMORY_RECORD_KIND.RELATION_REVISION) || [];
+  const revisionById = new Map(
+    [...memoryRevisions, ...relationRevisions].map((record) => [record.id, record]),
+  );
+  const validator = createRevisionValidator({
+    activeEvidenceIds: evidence.activeEvidenceIds,
+    revisionById,
+  });
+  const artifacts =
+    index.recordsByKind.get(MEMORY_RECORD_KIND.TURN_ARTIFACT) || [];
+  const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+  const artifactValidation = new Map();
+  const validatingArtifacts = new Set();
+  const validateArtifact = (artifact) => {
+    if (artifactValidation.has(artifact.id)) return artifactValidation.get(artifact.id);
+    if (validatingArtifacts.has(artifact.id)) {
+      const cyclic = { valid: false, reasons: [`artifact-cycle:${artifact.id}`] };
+      artifactValidation.set(artifact.id, cyclic);
+      return cyclic;
+    }
+    validatingArtifacts.add(artifact.id);
+    const reasons = [];
+    for (const evidenceId of artifact.evidenceIds || []) {
+      if (!evidence.activeEvidenceIds.has(evidenceId)) {
+        reasons.push(`inactive-evidence:${evidenceId}`);
+      }
+    }
+    for (const revisionId of artifact.dependencyRevisionIds || []) {
+      const validation = validator.validate(revisionId);
+      if (!validation.valid) reasons.push(`inactive-dependency:${revisionId}`);
+    }
+    for (const sourceArtifactId of artifact.sourceArtifactIds || []) {
+      const sourceArtifact = artifactById.get(sourceArtifactId);
+      if (!sourceArtifact) {
+        reasons.push(`missing-source-artifact:${sourceArtifactId}`);
+        continue;
+      }
+      const sourceValidation = validateArtifact(sourceArtifact);
+      if (!sourceValidation.valid) {
+        reasons.push(`inactive-source-artifact:${sourceArtifactId}`);
+      }
+    }
+    validatingArtifacts.delete(artifact.id);
+    const result = { valid: reasons.length === 0, reasons };
+    artifactValidation.set(artifact.id, result);
+    return result;
+  };
+  const grouped = new Map();
+  for (const artifact of artifacts) {
+    const key = `${artifact.turnId}::${artifact.artifactKind}::${artifact.inputFingerprint}::${artifact.historyFingerprint || ""}`;
+    const bucket = grouped.get(key) || [];
+    bucket.push(artifact);
+    grouped.set(key, bucket);
+  }
+  const active = [];
+  const inactive = [];
+  const latestByTurnVersionAndKind = new Map();
+  const latestByTurnInputAndKind = new Map();
+  const latestByTurnAndKind = new Map();
+  for (const [key, bucket] of grouped) {
+    const ordered = [...bucket].sort(compareLedgerOrder).reverse();
+    let selected = null;
+    for (const artifact of ordered) {
+      const validation = validateArtifact(artifact);
+      if (!validation.valid) {
+        inactive.push({ artifact, reasons: validation.reasons });
+        continue;
+      }
+      selected = artifact;
+      break;
+    }
+    if (!selected) continue;
+    latestByTurnVersionAndKind.set(key, selected);
+    active.push(selected);
+  }
+  for (const artifact of active) {
+    const inputKey = `${artifact.turnId}::${artifact.artifactKind}::${artifact.inputFingerprint}`;
+    const currentInput = latestByTurnInputAndKind.get(inputKey);
+    if (!currentInput || compareLedgerOrder(currentInput, artifact) < 0) {
+      latestByTurnInputAndKind.set(inputKey, artifact);
+    }
+    const key = `${artifact.turnId}::${artifact.artifactKind}`;
+    const current = latestByTurnAndKind.get(key);
+    if (!current || compareLedgerOrder(current, artifact) < 0) {
+      latestByTurnAndKind.set(key, artifact);
+    }
+  }
+  return {
+    active,
+    inactive,
+    latestByTurnVersionAndKind,
+    latestByTurnInputAndKind,
+    latestByTurnAndKind,
+    validationByArtifactId: artifactValidation,
+    get(turnId, artifactKind, inputFingerprint = "", historyFingerprint = "") {
+      const version = String(inputFingerprint || "").trim();
+      const history = String(historyFingerprint || "").trim();
+      if (version && history) {
+        return latestByTurnVersionAndKind.get(
+          `${turnId}::${artifactKind}::${version}::${history}`,
+        ) || null;
+      }
+      if (version) {
+        return latestByTurnInputAndKind.get(
+          `${turnId}::${artifactKind}::${version}`,
+        ) || null;
+      }
+      return latestByTurnAndKind.get(`${turnId}::${artifactKind}`) || null;
+    },
+  };
+}
+
 export function materializeMemoryLedger(ledger) {
   const index = buildMemoryLedgerIndex(ledger);
   const evidence = materializeEvidenceState(ledger);
@@ -228,6 +346,7 @@ export function materializeMemoryLedger(ledger) {
     .map((revision) => ({ revision, reasons: ["inactive-endpoint"] }));
   const inbox = materializeInboxState(ledger);
   const agent = materializeAgentRuns(ledger);
+  const turnArtifacts = materializeTurnArtifacts(ledger);
   return {
     chatId: ledger.chatId,
     revision: ledger.revision,
@@ -246,6 +365,7 @@ export function materializeMemoryLedger(ledger) {
     },
     inbox,
     agent,
+    turnArtifacts,
     validationByRevisionId: validator.cache,
   };
 }

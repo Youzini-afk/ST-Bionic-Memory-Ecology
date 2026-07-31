@@ -31,10 +31,10 @@ export class MemoryLedgerRepository {
     });
   }
 
-  async transact(chatId, transactionOrFactory) {
+  async transact(chatId, transactionOrFactory, options = {}) {
     return await this.coordinator.run(chatId, async () => {
       const adapter = await this._resolveAdapter(chatId);
-      return await adapter.transact(transactionOrFactory);
+      return await adapter.transact(transactionOrFactory, options);
     });
   }
 

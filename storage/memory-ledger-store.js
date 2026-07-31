@@ -15,6 +15,14 @@ function isPhysicalConflict(error) {
   );
 }
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("memory ledger transaction was cancelled");
+  error.name = "AbortError";
+  throw error;
+}
+
 export class MemoryLedgerStoreAdapter {
   constructor({ chatId, store, physicalRetryLimit = 4 } = {}) {
     this.chatId = String(chatId || "").trim();
@@ -43,14 +51,17 @@ export class MemoryLedgerStoreAdapter {
     return ledger;
   }
 
-  async transact(transactionOrFactory) {
+  async transact(transactionOrFactory, { signal = null } = {}) {
     let lastConflict = null;
     for (let attempt = 0; attempt < this.physicalRetryLimit; attempt += 1) {
+      throwIfAborted(signal);
       const ledger = await this.load({ fresh: attempt > 0 });
+      throwIfAborted(signal);
       const transaction =
         typeof transactionOrFactory === "function"
           ? await transactionOrFactory(ledger)
           : transactionOrFactory;
+      throwIfAborted(signal);
       if (!transaction) {
         return { ledger, commit: null, appendedRecords: [], replayed: false, changed: false };
       }
@@ -62,7 +73,9 @@ export class MemoryLedgerStoreAdapter {
       // after the revision read makes the subsequent CAS fail; a ledger writer
       // before the head read is detected without overwriting its head.
       const physicalRevision = await this.store.getRevision();
+      throwIfAborted(signal);
       const persistedHead = await this.store.getMeta(MEMORY_LEDGER_HEAD_META_KEY, null);
+      throwIfAborted(signal);
       if (
         memoryLedgerHeadFingerprint(persistedHead) !==
         memoryLedgerHeadFingerprint(this._cachedHead)
@@ -75,6 +88,7 @@ export class MemoryLedgerStoreAdapter {
       }
 
       try {
+        throwIfAborted(signal);
         const physicalResult = await this.store.commitDelta(
           { runtimeMetaPatch: encoded.runtimeMetaPatch },
           {
