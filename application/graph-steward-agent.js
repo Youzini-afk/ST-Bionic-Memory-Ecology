@@ -1,10 +1,19 @@
 import { buildAgentProfileMessages } from "../agent/profile-runtime.js";
+import { isAbortLikeError } from "../agent/errors.js";
 import { GraphStewardAgentToolset } from "../agent/graph-steward-tools.js";
 import { AgentToolRegistry } from "../agent/tool-registry.js";
 import { TransientAgentJournal } from "../agent/transient-journal.js";
 import { createBmeAgentRunId } from "../agent/journal.js";
 import { createDomainId } from "../domain/memory-id.js";
 import { createBmeAgentRuntime } from "./bme-agent-runtime.js";
+
+function reportOutcome(observer, runId, outcome) {
+  try {
+    observer?.recordOutcome?.({ runId, outcome });
+  } catch {
+    // Observability never changes the memory task outcome.
+  }
+}
 
 export async function runGraphStewardAgent({
   chatId,
@@ -18,6 +27,7 @@ export async function runGraphStewardAgent({
   model,
   countTokens,
   journal = new TransientAgentJournal(),
+  observer = null,
   signal = null,
   instructions = "",
   agentPromptBuilder = buildAgentProfileMessages,
@@ -72,6 +82,7 @@ export async function runGraphStewardAgent({
         journal,
         settings,
         toolRegistry: registry,
+        observer,
         ...(model ? { model } : {}),
         ...(countTokens ? { countTokens } : {}),
       });
@@ -95,7 +106,7 @@ export async function runGraphStewardAgent({
     } catch (error) {
       const settledOutcome = toolset.getOutcome(runId);
       if (
-        (signal?.aborted || error?.name === "AbortError") &&
+        (signal?.aborted || isAbortLikeError(error)) &&
         !["pipeline", "no_change"].includes(settledOutcome.kind)
       ) {
         throw error;
@@ -130,6 +141,16 @@ export async function runGraphStewardAgent({
         result,
       };
     }
+    reportOutcome(observer, runId, {
+      kind: String(outcome.kind || "unknown"),
+      completed: outcome.completed === true,
+      reason: String(outcome.reason || ""),
+      fallback: String(outcome.kind || "").startsWith("pipeline_fallback"),
+      pipelineSuccess: outcome.result?.success === true,
+      processedFloor: Number.isFinite(Number(outcome.result?.processedFloor))
+        ? Number(outcome.result.processedFloor)
+        : null,
+    });
     return {
       success: outcome.completed === true,
       runId,

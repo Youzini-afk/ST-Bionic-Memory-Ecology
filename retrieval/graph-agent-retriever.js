@@ -3,6 +3,7 @@ import { AgentToolRegistry } from "../agent/tool-registry.js";
 import { TransientAgentJournal } from "../agent/transient-journal.js";
 import { buildAgentProfileMessages } from "../agent/profile-runtime.js";
 import { createBmeAgentRunId } from "../agent/journal.js";
+import { isAbortLikeError } from "../agent/errors.js";
 import { cloneDomainValue, createDomainId } from "../domain/memory-id.js";
 import { createBmeAgentRuntime } from "../application/bme-agent-runtime.js";
 import { buildRecallCandidatePacket } from "./recall-candidate-packet.js";
@@ -179,6 +180,7 @@ export async function retrieveWithGraphAgent({
   model,
   countTokens,
   journal = new TransientAgentJournal(),
+  observer = null,
   retrieveFn = null,
   resultBuilder = null,
   agentPromptBuilder = buildAgentProfileMessages,
@@ -314,6 +316,7 @@ export async function retrieveWithGraphAgent({
         journal,
         settings,
         toolRegistry: registry,
+        observer,
         ...(model ? { model } : {}),
         ...(countTokens ? { countTokens } : {}),
       });
@@ -334,11 +337,23 @@ export async function retrieveWithGraphAgent({
         signal,
       });
     } catch (error) {
-      if (signal?.aborted || error?.name === "AbortError") throw error;
+      if (signal?.aborted || isAbortLikeError(error)) throw error;
       runError = error;
     }
     const outcome = toolset.getOutcome(runId);
     if (outcome.kind === "published") {
+      try {
+        observer?.recordOutcome?.({
+          runId,
+          outcome: {
+            kind: "published",
+            completed: true,
+            selectedMemoryCount: Array.isArray(outcome.selectedMemoryIds)
+              ? outcome.selectedMemoryIds.length
+              : 0,
+          },
+        });
+      } catch {}
       return await buildResult({
         graph: recallGraph,
         schema,
@@ -349,6 +364,20 @@ export async function retrieveWithGraphAgent({
         resultBuilder: buildRetrievalResult,
       });
     }
+    try {
+      observer?.recordOutcome?.({
+        runId,
+        outcome: {
+          kind: String(outcome.kind || "fallback"),
+          completed: false,
+          fallback: true,
+          reason: String(runError?.message || "missing-agent-publication"),
+          selectedMemoryCount: Array.isArray(packet.initialSelectedMemoryIds)
+            ? packet.initialSelectedMemoryIds.length
+            : 0,
+        },
+      });
+    } catch {}
     return await buildResult({
       graph: recallGraph,
       schema,

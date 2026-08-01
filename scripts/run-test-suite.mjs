@@ -10,6 +10,7 @@ const PRODUCT_CONTRACT_TESTS = [
   "agent-llm-transport-contract.mjs",
   "agent-loop.mjs",
   "agent-model-protocol.mjs",
+  "agent-run-monitor.mjs",
   "agent-runtime-settings.mjs",
   "agent-token-counter.mjs",
   "agent-tool-registry.mjs",

@@ -22,6 +22,7 @@ export function createBmeAgentRuntime({
   model = callDefaultBmeAgentModel,
   countTokens = countDefaultBmeAgentContextTokens,
   toolRegistry = new AgentToolRegistry(),
+  observer = null,
   now = () => Date.now(),
 } = {}) {
   if (!journal && !memoryLedgerRepository) {
@@ -41,6 +42,7 @@ export function createBmeAgentRuntime({
     toolRegistry,
     journal: resolvedJournal,
     context,
+    observer,
     settings,
     now,
   });

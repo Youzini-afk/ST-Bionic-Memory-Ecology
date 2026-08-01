@@ -45,6 +45,7 @@ function normalizeMessages(messages) {
 function createRunAbortSignal(externalSignal, timeoutMs) {
   const controller = new AbortController();
   let timedOut = false;
+  let cancelled = false;
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
   if (externalSignal?.aborted) abortFromExternal();
   else externalSignal?.addEventListener?.("abort", abortFromExternal, { once: true });
@@ -57,11 +58,33 @@ function createRunAbortSignal(externalSignal, timeoutMs) {
   return {
     signal: controller.signal,
     didTimeOut: () => timedOut,
+    didCancel: () => cancelled,
+    cancel(reason = "Cancelled by user") {
+      if (controller.signal.aborted) return false;
+      cancelled = true;
+      controller.abort(
+        new BmeAgentCancelledError(String(reason || "Cancelled by user")),
+      );
+      return true;
+    },
     dispose() {
       clearTimeout(timer);
       externalSignal?.removeEventListener?.("abort", abortFromExternal);
     },
   };
+}
+
+function notifyObserver(observer, method, payload) {
+  const handler = observer?.[method];
+  if (typeof handler !== "function") return;
+  try {
+    const result = handler.call(observer, payload);
+    if (result && typeof result.then === "function") {
+      void result.catch(() => {});
+    }
+  } catch {
+    // Presentation and diagnostics must never affect Agent execution.
+  }
 }
 
 function terminalPayload(error, extra = {}) {
@@ -79,6 +102,7 @@ export class BmeAgentLoop {
     toolRegistry,
     journal,
     context,
+    observer = null,
     settings = {},
     now = () => Date.now(),
   } = {}) {
@@ -98,6 +122,7 @@ export class BmeAgentLoop {
     this.toolRegistry = toolRegistry;
     this.journal = journal;
     this.context = context;
+    this.observer = observer;
     this.settings = normalizeBmeAgentRuntimeSettings(settings);
     this.now = typeof now === "function" ? now : () => Date.now();
   }
@@ -129,15 +154,21 @@ export class BmeAgentLoop {
     let modelRequestCount = 0;
     let terminalWritten = false;
     let runStarted = false;
+    let detachControl = () => {};
 
-    const append = async (eventType, payload = {}, eventKey = "") =>
-      await this.journal.append({
+    const append = async (eventType, payload = {}, eventKey = "") => {
+      const result = await this.journal.append({
         chatId,
         runId: resolvedRunId,
         eventType,
         payload,
         eventKey,
       });
+      if (result?.event) {
+        notifyObserver(this.observer, "recordEvent", result.event);
+      }
+      return result;
+    };
 
     const elapsedMs = () => Math.max(0, Number(this.now()) - Number(startedAt));
     const assertRunGuard = () => {
@@ -155,7 +186,7 @@ export class BmeAgentLoop {
     };
 
     try {
-      await this.journal.startRun({
+      const started = await this.journal.startRun({
         chatId,
         runId: resolvedRunId,
         taskId,
@@ -164,9 +195,21 @@ export class BmeAgentLoop {
         sourceRecordIds,
         toolSnapshot,
         runtimeSettings: this.settings,
-        metadata,
+        metadata: {
+          ...cloneDomainValue(metadata, {}),
+          taskType: String(taskType || metadata?.taskType || ""),
+        },
       });
       runStarted = true;
+      if (started?.event) {
+        notifyObserver(this.observer, "recordEvent", started.event);
+      }
+      if (typeof this.observer?.registerControl === "function") {
+        detachControl = this.observer.registerControl({
+          runId: resolvedRunId,
+          cancel: (reason) => runAbort.cancel(reason),
+        }) || detachControl;
+      }
 
       while (true) {
         assertRunGuard();
@@ -216,6 +259,17 @@ export class BmeAgentLoop {
                 maxContextTokens: this.settings.contextWindowTokens,
                 taskType,
                 requestSource: `agent:${agentKind}:context-compaction`,
+                onStreamProgress: (progress) =>
+                  notifyObserver(this.observer, "recordStreamDelta", {
+                    chatId,
+                    taskId,
+                    runId: resolvedRunId,
+                    agentKind,
+                    taskType,
+                    requestNumber: modelRequestCount,
+                    purpose: "context-compaction",
+                    ...progress,
+                  }),
               }),
             );
             if (response.toolCalls.length > 0) {
@@ -279,6 +333,17 @@ export class BmeAgentLoop {
             maxContextTokens: this.settings.contextWindowTokens,
             taskType,
             requestSource: `agent:${agentKind}:turn`,
+            onStreamProgress: (progress) =>
+              notifyObserver(this.observer, "recordStreamDelta", {
+                chatId,
+                taskId,
+                runId: resolvedRunId,
+                agentKind,
+                taskType,
+                requestNumber: modelRequestCount,
+                purpose: "agent-turn",
+                ...progress,
+              }),
           }),
         );
         const response = canonical.response;
@@ -406,7 +471,11 @@ export class BmeAgentLoop {
               elapsedMs: elapsedMs(),
             });
           }
-        } else if (externalSignal?.aborted || error instanceof BmeAgentCancelledError) {
+        } else if (
+          runAbort.didCancel() ||
+          externalSignal?.aborted ||
+          error instanceof BmeAgentCancelledError
+        ) {
           terminalType = AGENT_EVENT_TYPE.RUN_CANCELLED;
           if (!(error instanceof BmeAgentCancelledError)) {
             outgoing = new BmeAgentCancelledError(error?.message || "BME Agent run was cancelled");
@@ -445,6 +514,9 @@ export class BmeAgentLoop {
       }
       throw error;
     } finally {
+      try {
+        detachControl();
+      } catch {}
       runAbort.dispose();
     }
   }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 
+import { BmeAgentCancelledError } from "../agent/errors.js";
 import { runGraphStewardAgent } from "../application/graph-steward-agent.js";
 
 const agentPromptCalls = [];
@@ -268,5 +269,24 @@ const committedDuringAbort = await runGraphStewardAgent({
 assert.equal(committedDuringAbort.success, true);
 assert.equal(committedDuringAbort.outcome.kind, "pipeline");
 assert.equal(committedAbortCalls, 1);
+
+let cancelledFallbackCalls = 0;
+await assert.rejects(
+  () =>
+    runGraphStewardAgent({
+      ...base,
+      endFloor: 15,
+      runPipeline: async () => {
+        cancelledFallbackCalls += 1;
+        return { success: true };
+      },
+      completeWithoutChanges: async () => ({ success: true }),
+      model: async () => {
+        throw new BmeAgentCancelledError("cancelled from monitor");
+      },
+    }),
+  BmeAgentCancelledError,
+);
+assert.equal(cancelledFallbackCalls, 0);
 
 console.log("graph Steward Agent tests passed");

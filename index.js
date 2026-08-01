@@ -197,6 +197,7 @@ import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
+import { createAgentRunMonitor } from "./runtime/agent-run-monitor.js";
 import { runGraphStewardAgent } from "./application/graph-steward-agent.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
@@ -1716,7 +1717,9 @@ const conversationWorkspace = createConversationWorkspace({
   createStatus: createInitialUiStatus,
   clearTimeout,
 });
+const agentRunMonitor = createAgentRunMonitor();
 const graphStewardWorkers = new Map();
+agentRunMonitor.subscribe(() => refreshPanelLiveState());
 conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
   reason: "runtime-init",
 });
@@ -4911,7 +4914,11 @@ function createAbortError(message = "操作已终止") {
 }
 
 function isAbortError(error) {
-  return error?.name === "AbortError";
+  return (
+    error?.name === "AbortError" ||
+    error?.code === "ABORT_ERR" ||
+    error?.code === "bme_agent_cancelled"
+  );
 }
 
 function throwIfAborted(signal, message = "操作已终止") {
@@ -15866,6 +15873,7 @@ async function runGraphStewardBatch({
     allowedCapabilities,
     settings,
     signal,
+    observer: agentRunMonitor,
     runPipeline: async ({ capabilities = {}, reason = "", signal: toolSignal }) => {
       if (toolSignal?.aborted) {
         throw toolSignal.reason || createAbortError("graph-steward-aborted");
@@ -16161,6 +16169,7 @@ async function retrieveForMemoryRuntime(request = {}) {
       chatId,
       turnId,
     },
+    observer: agentRunMonitor,
   });
 }
 
@@ -18226,6 +18235,8 @@ async function onCompactLukerSidecar() {
       manageServerBackups: onManageServerBackups,
       deleteServerBackupEntry: onDeleteServerBackupEntry,
       getRestoreSafetyStatus: onGetRestoreSafetySnapshotStatus,
+      cancelAgentRun: async (runId) =>
+        agentRunMonitor.cancel(runId, "Cancelled from the BME Agent panel"),
     },
     console,
     document: getHostDocument(),
@@ -18240,6 +18251,10 @@ async function onCompactLukerSidecar() {
     getLastRecall: () => conversationWorkspace.lastRecalledItems,
     getLastRecallStatus: () => conversationWorkspace.lastRecallStatus,
     getLastVectorStatus: () => conversationWorkspace.lastVectorStatus,
+    getAgentRunSnapshot: (options = {}) =>
+      agentRunMonitor.getSnapshot({
+        chatId: options?.includeAll === true ? "" : String(getCurrentChatId() || ""),
+      }),
     getPanelModule: () => _panelModule,
     getRuntimeDebugSnapshot: (options = {}) =>
       getPanelRuntimeDebugSnapshot(options),

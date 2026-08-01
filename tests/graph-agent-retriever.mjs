@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 
+import { BmeAgentCancelledError } from "../agent/errors.js";
 import { createEmptyGraph } from "../graph/graph.js";
 import { DEFAULT_NODE_SCHEMA } from "../graph/schema.js";
 import { retrieveWithGraphAgent } from "../retrieval/graph-agent-retriever.js";
@@ -227,6 +228,25 @@ const fallback = await retrieveWithGraphAgent({
 assert.deepEqual(fallback.selectedNodeIds, ["memory:baseline"]);
 assert.equal(fallback.meta.retrieval.llm.status, "fallback");
 assert.match(fallback.meta.retrieval.llm.reason, /程序召回/);
+
+await assert.rejects(
+  () =>
+    retrieveWithGraphAgent({
+      graph,
+      userMessage: "Cancel this recall.",
+      schema: DEFAULT_NODE_SCHEMA,
+      settings: baseSettings,
+      options: { chatId: "chat:graph-agent", turnId: "turn:cancel" },
+      retrieveFn,
+      resultBuilder,
+      agentPromptBuilder,
+      countTokens: () => 100,
+      model: async () => {
+        throw new BmeAgentCancelledError("cancelled from monitor");
+      },
+    }),
+  BmeAgentCancelledError,
+);
 
 graph.nodes.push(node("memory:private", 9, "must remain outside this POV"));
 let guardedModelCall = 0;
