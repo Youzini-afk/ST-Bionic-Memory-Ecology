@@ -218,6 +218,16 @@ function testUiSnapshotIsBoundedAndAvoidsDeepClone() {
         .filter((run) => run.runId !== "run-ui-0")
         .every((run) => run.events.length === 0),
     );
+    assert.deepEqual(
+      monitor.getUiSnapshot({ chatId: "chat:ui-projection", activityOnly: true }),
+      {
+        revision: snapshot.revision,
+        updatedAt: snapshot.updatedAt,
+        activeCount: 3,
+        runs: [],
+      },
+      "activity probes must not project or sort run history",
+    );
     assert.equal(monitor.hasActiveRun({ chatId: "chat:ui-projection" }), true);
   } finally {
     globalThis.structuredClone = originalStructuredClone;

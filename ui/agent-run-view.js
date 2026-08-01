@@ -635,6 +635,16 @@ function runTabsSignature(runs, timestamp = Date.now()) {
     .join("|");
 }
 
+export function buildAgentRunHeaderSignature(run = {}, timestamp = Date.now()) {
+  const status = displayStatus(run);
+  return JSON.stringify([
+    run.runId, run.taskType, agentLabel(run), runScope(run), status.key, status.tone,
+    Math.floor(effectiveElapsed(run, timestamp) / 1000), Number(run.modelRequestCount || 0),
+    Number(run.toolCallCount || 0), Number(run?.usage?.total_tokens || run?.usage?.totalTokens || 0),
+    run.cancellable === true, run.phase,
+  ]);
+}
+
 export function createAgentRunViewController({
   root,
   getSnapshot,
@@ -644,6 +654,7 @@ export function createAgentRunViewController({
 } = {}) {
   let selectedRunId = "";
   let runStripSignature = "";
+  let runHeaderSignature = "";
   let shellMounted = false;
   let heartbeatTimer = null;
   let lastRuns = [];
@@ -673,6 +684,7 @@ export function createAgentRunViewController({
       </div>`;
     shellMounted = true;
     runStripSignature = "";
+    runHeaderSignature = "";
     entryNodes.clear();
     diagnosticPayloads.clear();
     timelineOrderSignature = "";
@@ -700,6 +712,9 @@ export function createAgentRunViewController({
   function renderHeader(run) {
     const header = root?.querySelector?.("[data-agent-header]");
     if (!header) return;
+    const nextSignature = buildAgentRunHeaderSignature(run, now());
+    if (nextSignature === runHeaderSignature) return;
+    runHeaderSignature = nextSignature;
     const status = displayStatus(run);
     const usage = Number(run?.usage?.total_tokens || run?.usage?.totalTokens || 0);
     header.innerHTML = `

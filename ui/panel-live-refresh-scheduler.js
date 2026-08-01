@@ -7,6 +7,35 @@ export function shouldRefreshPanelHeavyContent({
     (tabId === "task" && ["agent", "pipeline"].includes(taskSectionId));
 }
 
+export function scheduleAfterNextPaint(callback, {
+  requestFrame = (next) => requestAnimationFrame(next),
+  scheduleTimer = (next, delay) => setTimeout(next, delay),
+} = {}) {
+  return requestFrame(() => scheduleTimer(callback, 0));
+}
+
+export function buildTaskPipelineRefreshSignature({
+  extraction = {}, vector = {}, recall = {}, persistence = {},
+  authorityJob = {}, authorityRecentJobs = {}, batchStatus = {},
+  contextKey = "",
+} = {}) {
+  const status = (value, omitLiveDetail = false) => [
+    value?.color || value?.level || "",
+    value?.label || value?.text || "",
+    omitLiveDetail && value?.color === "cyan" ? "" : value?.detail || value?.meta || "",
+  ];
+  return JSON.stringify([
+    contextKey,
+    status(extraction, true), status(vector), status(recall), status(persistence),
+    authorityJob?.queueState, authorityJob?.label, authorityJob?.detail,
+    authorityJob?.progress, authorityJob?.jobId,
+    authorityRecentJobs?.updatedAt, authorityRecentJobs?.error,
+    (authorityRecentJobs?.jobs || []).map((job) => [job.jobId, job.queueState, job.updatedAt]),
+    batchStatus?.batchId, batchStatus?.persistenceOutcome,
+    batchStatus?.stageOutcomes, batchStatus?.warnings?.length, batchStatus?.errors?.length,
+  ]);
+}
+
 export function createPanelLiveRefreshScheduler({
   refresh,
   isActive = () => true,

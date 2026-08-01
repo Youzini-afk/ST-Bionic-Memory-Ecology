@@ -18280,6 +18280,8 @@ async function onCompactLukerSidecar() {
         chatId: options?.includeAll === true ? "" : String(getCurrentChatId() || ""),
         detailRunId: options?.detailRunId,
         maxRuns: options?.maxRuns,
+        maxEvents: options?.maxEvents,
+        activityOnly: options?.activityOnly,
       }),
     getPanelModule: () => _panelModule,
     getRuntimeDebugSnapshot: (options = {}) =>

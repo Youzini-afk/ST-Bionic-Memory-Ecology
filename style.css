@@ -23,6 +23,16 @@
   pointer-events: auto;
 }
 
+#st-bme-panel-overlay.runtime-busy {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+#st-bme-panel-overlay.runtime-busy,
+#st-bme-panel-overlay.runtime-busy #st-bme-panel {
+  transition: none;
+}
+
 /* --- Panel Container --- */
 #st-bme-panel {
   width: 82vw;

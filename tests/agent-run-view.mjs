@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { setLocale } from "../i18n/index.js";
 import {
   buildAgentEntryRenderSignature,
+  buildAgentRunHeaderSignature,
   buildAgentRunTimeline,
 } from "../ui/agent-run-view.js";
 
@@ -198,6 +199,28 @@ function event(id, eventType, payload = {}) {
   });
   assert.ok(signature.length < 200);
   assert.doesNotMatch(signature, /do-not-sign/);
+}
+
+{
+  const run = {
+    runId: "run-header",
+    phase: "streaming",
+    startedAt: 1_000,
+    modelRequestCount: 2,
+    toolCallCount: 1,
+    usage: { total_tokens: 128 },
+    metadata: { startFloor: 4, endFloor: 6 },
+    cancellable: true,
+  };
+  assert.equal(
+    buildAgentRunHeaderSignature(run, 2_100),
+    buildAgentRunHeaderSignature(run, 2_800),
+    "sub-second stream deltas must not rebuild the Agent header",
+  );
+  assert.notEqual(
+    buildAgentRunHeaderSignature(run, 2_800),
+    buildAgentRunHeaderSignature({ ...run, toolCallCount: 2 }, 2_800),
+  );
 }
 
 console.log("Agent run view tests passed");

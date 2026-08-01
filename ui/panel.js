@@ -1,6 +1,7 @@
 // ST-BME: 操控面板交互逻辑
 
 import { GraphRenderer } from "./graph-renderer.js";
+import { ensurePanelGraphRenderers } from "./panel-graph-renderer-lifecycle.js";
 import {
   buildGraphStructureFingerprint,
   buildVisibleGraphRefreshToken,
@@ -8,7 +9,10 @@ import {
   resolveVisibleGraphWorkspaceMode,
   shouldDeferVisibleGraphRefresh,
 } from "./panel-graph-refresh-utils.js";
-import { createPanelLiveRefreshScheduler, shouldRefreshPanelHeavyContent } from "./panel-live-refresh-scheduler.js";
+import {
+  buildTaskPipelineRefreshSignature, createPanelLiveRefreshScheduler,
+  scheduleAfterNextPaint, shouldRefreshPanelHeavyContent,
+} from "./panel-live-refresh-scheduler.js";
 import { initPlannerSections, refreshPlannerSections } from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import { normalizeMemoryScope } from "../graph/memory-scope.js";
@@ -394,7 +398,7 @@ let lastVisibleGraphRefreshAt = 0;
 let lastGraphTransientHighlightSignature = "";
 let lastGraphTransientHighlightRenderer = null;
 let graphRenderingEnabled = true;
-let agentRunViewController = null;
+let agentRunViewController = null, lastTaskPipelineRenderSignature = "";
 
 function _isPluginEnabled(settings = _getSettings?.() || {}) {
   return settings?.enabled !== false;
@@ -867,8 +871,8 @@ function _getCurrentGraphRefreshToken() {
 function _getCurrentGraphStructureFingerprint() {
   return buildGraphStructureFingerprint(_getGraph?.());
 }
-
 function _isExtractionUiRunning() {
+  if (Number(_getAgentRunSnapshot?.({ activityOnly: true })?.activeCount || 0) > 0) return true;
   const status = typeof _getLastExtractionStatus === "function"
     ? _getLastExtractionStatus() || {}
     : {};
@@ -975,6 +979,7 @@ function _refreshVisibleGraphWorkspace({ force = false, final = false, hard = fa
   if (shouldDeferVisibleGraphRefresh({
     extractionRunning: _isExtractionUiRunning(), final, hard,
   })) return { refreshed: false, reason: "extraction-running" };
+  if (_isGraphCanvasVisibleMode(visibleMode)) _ensurePanelGraphRenderers();
 
   const graph = _getGraph?.();
   const nextToken = _getCurrentGraphRefreshToken();
@@ -1263,6 +1268,7 @@ export async function initPanel({
   _bindMemoryPopup();
   _bindResizeHandle();
   _bindPanelResize();
+  _restorePanelSize();
   _bindGraphControls();
   _bindActions();
   _bindDashboardControls();
@@ -1288,6 +1294,7 @@ export async function initPanel({
   _syncConfigSectionState();
   _syncTaskSectionState();
   _refreshRuntimeStatus();
+  _buildLegend();
   _initFloatingBall();
   _bindFabToggle();
 }
@@ -1298,6 +1305,7 @@ export function updatePanelLocale(localeMode = "auto") {
   _syncFloatingBallWithRuntimeStatus();
   if (currentTaskSectionId === "agent") _syncTaskSectionState();
   agentRunViewController?.reset?.();
+  lastTaskPipelineRenderSignature = "";
   _getActiveGraphRenderer()?._render?.();
 }
 
@@ -1507,48 +1515,38 @@ export function updateFloatingBallStatus(status = "idle", tooltipText = "") {
 /**
  * 打开面板
  */
+function _ensurePanelGraphRenderers(settings = _getSettings?.() || {}) {
+  const renderers = ensurePanelGraphRenderers({
+    GraphRenderer, document, graphRenderer, mobileGraphRenderer,
+    isMobile: _isMobile(), onNodeSelect: _showNodeDetail,
+    graphOptions: { theme: settings.panelTheme || "crimson",
+      userPovAliases: _hostUserPovAliasHintsForGraph(),
+      runtimeConfig: _buildGraphRuntimeConfig(settings) },
+  });
+  graphRenderer = renderers.graphRenderer;
+  mobileGraphRenderer = renderers.mobileGraphRenderer;
+  _applyGraphRuntimeConfig(settings);
+  _applyGraphRenderEnabledState();
+}
+
 export function openPanel() {
   if (!overlayEl) return;
   ensureOverlayMountedAtRoot();
   syncViewportCssVars();
-  void Promise.resolve()
-    .then(() => _actionHandlers.syncGraphLoad?.())
-    .then(_refreshRuntimeStatus)
-    .catch((error) => reportPanelGraphLoadFailure(error, updateFloatingBallStatus));
+  const extractionRunning = _isExtractionUiRunning();
+  overlayEl.classList.toggle("runtime-busy", extractionRunning);
   overlayEl.classList.add("active");
-
-  _restorePanelSize();
-
-  const isMobile = _isMobile();
-  const settings = _getSettings?.() || {};
-  const themeName = settings.panelTheme || "crimson";
-
-  const graphOpts = {
-    theme: themeName,
-    userPovAliases: _hostUserPovAliasHintsForGraph(),
-    runtimeConfig: _buildGraphRuntimeConfig(settings),
-  };
-  const canvas = document.getElementById("bme-graph-canvas");
-  if (canvas && !graphRenderer && !isMobile) {
-    graphRenderer = new GraphRenderer(canvas, graphOpts);
-    graphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
-  }
-
-  const mobileCanvas = document.getElementById("bme-mobile-graph-canvas");
-  if (mobileCanvas && !mobileGraphRenderer && isMobile) {
-    mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
-    mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
-  }
-
-  _applyGraphRuntimeConfig(settings);
-
-  _applyGraphRenderEnabledState();
+  scheduleAfterNextPaint(() => {
+    if (!overlayEl?.classList.contains("active")) return;
+    void Promise.resolve()
+      .then(() => _actionHandlers.syncGraphLoad?.())
+      .then(() => _refreshRuntimeStatus())
+      .catch((error) => reportPanelGraphLoadFailure(error, updateFloatingBallStatus));
+  });
 
   const activeTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
-  _switchTab(activeTabId, { refresh: false });
-  _refreshRuntimeStatus();
-  _buildLegend();
+  if (activeTabId !== currentTabId) _switchTab(activeTabId, { refresh: false });
   refreshLiveState({ deferInitial: true });
 }
 
@@ -1583,14 +1581,13 @@ function _doRefreshLiveState() {
   const settings = _getSettings?.() || {};
   const extractionRunning = _isExtractionUiRunning();
   const refreshHeavyContent = shouldRefreshPanelHeavyContent({ extractionRunning, tabId: currentTabId, taskSectionId: currentTaskSectionId });
-  _applyGraphRuntimeConfig(settings);
-  _refreshRuntimeStatus();
-  _refreshNativeRolloutStatusUi(settings);
+  overlayEl?.classList.toggle("runtime-busy", extractionRunning);
+  const loadInfo = _refreshRuntimeStatus();
   _refreshHideOldMessagesStatus(settings);
 
   if (currentTabId === "dashboard" && refreshHeavyContent) _refreshDashboard();
   else if (currentTabId === "task" && refreshHeavyContent) {
-    _refreshTaskMonitor();
+    _refreshTaskMonitor(loadInfo);
   }
 
   if (
@@ -1601,8 +1598,8 @@ function _doRefreshLiveState() {
     _refreshTaskProfileWorkspace();
   }
 
-  _scheduleVisibleGraphWorkspaceRefresh();
-  _syncGraphTransientHighlights();
+  if (!extractionRunning) _scheduleVisibleGraphWorkspaceRefresh();
+  if (!extractionRunning) _syncGraphTransientHighlights();
 }
 
 function _refreshHideOldMessagesStatus(settings = _getSettings?.() || {}) {
@@ -1677,6 +1674,7 @@ function _switchTab(tabId, { refresh = true } = {}) {
 
   _applyWorkspaceMode();
   if (!refresh) return;
+  if (_isExtractionUiRunning() && !shouldRefreshPanelHeavyContent({ extractionRunning: true, tabId: currentTabId, taskSectionId: currentTaskSectionId })) return;
 
   switch (currentTabId) {
     case "dashboard":
@@ -1768,7 +1766,7 @@ function _switchTaskSection(sectionId) {
   taskSectionUserSelected = true;
   _closeMemoryPopup();
   _syncTaskSectionState();
-  _refreshTaskMonitor();
+  if (shouldRefreshPanelHeavyContent({ extractionRunning: _isExtractionUiRunning(), tabId: "task", taskSectionId: currentTaskSectionId })) _refreshTaskMonitor();
 }
 
 function _syncTaskSectionState() {
@@ -1790,7 +1788,7 @@ function _syncTaskSectionState() {
   if (desc) desc.textContent = meta.descKey ? t(meta.descKey) : meta.desc;
 }
 
-function _refreshTaskMonitor() {
+function _refreshTaskMonitor(loadInfo = null) {
   const agentMode = String(_getSettings?.()?.memoryRuntimeMode || "workflow") === "agent";
   const agentSnapshot = agentMode
     ? _getAgentRunSnapshot?.({
@@ -1818,7 +1816,7 @@ function _refreshTaskMonitor() {
       agentRunViewController?.refresh?.({ snapshot: agentSnapshot });
       break;
     case "pipeline":
-      _refreshTaskPipelineOverview();
+      _refreshTaskPipelineOverview(loadInfo || undefined);
       break;
     case "timeline":
       _refreshTaskTimeline();
@@ -1846,9 +1844,9 @@ function _resolvePipelineStatus(statusObj) {
   const meta = String(statusObj.meta || "");
   const level = String(statusObj.level || "info");
   let color = "green";
-  if (level === "warn") color = "amber";
+  if (level === "warn" || level === "warning") color = "amber";
   else if (level === "error") color = "red";
-  else if (text.toLowerCase().includes("running") || text.toLowerCase().includes("进行中") || text.includes("正在")) color = "cyan";
+  else if (level === "running" || text.toLowerCase().includes("running") || text.includes("进行中") || text.includes("正在")) color = "cyan";
   return { label: text || "IDLE", color, detail: meta };
 }
 
@@ -2413,13 +2411,10 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
   ];
 }
 
-function _refreshTaskPipelineOverview() {
+function _refreshTaskPipelineOverview(loadInfo = _getGraphPersistenceSnapshot()) {
   const el = document.getElementById("bme-task-pipeline");
   if (!el) return;
 
-  const graph = _getGraph?.() || {};
-  const historyState = graph.runtimeState?.historyState || graph.historyState || {};
-  const loadInfo = _getGraphPersistenceSnapshot();
   const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
   const authorityRecentJobsUi = _buildAuthorityRecentJobsUiState(loadInfo);
 
@@ -2455,6 +2450,13 @@ function _refreshTaskPipelineOverview() {
   });
 
   const batchStatus = _getLatestBatchStatusSnapshot() || {};
+  const nextRenderSignature = buildTaskPipelineRefreshSignature({
+    extraction, vector, recall, persistence,
+    authorityJob: authorityJobUi, authorityRecentJobs: authorityRecentJobsUi,
+    batchStatus, contextKey: loadInfo.chatId,
+  });
+  if (nextRenderSignature === lastTaskPipelineRenderSignature) return;
+  lastTaskPipelineRenderSignature = nextRenderSignature;
   const stages = [
     { key: "core", label: "Core" },
     { key: "structural", label: "结构" },
@@ -4685,6 +4687,7 @@ function _closeFullscreenGraph() {
 function _switchConfigSection(sectionId) {
   currentConfigSectionId = sectionId || "toggles";
   _syncConfigSectionState();
+  if (_isExtractionUiRunning()) return;
   if (currentConfigSectionId === "prompts") {
     _refreshTaskProfileWorkspace();
   } else if (currentConfigSectionId === "trace") {
@@ -14192,8 +14195,7 @@ function _renderStatefulListPlaceholder(listEl, text) {
   listEl.replaceChildren(li);
 }
 
-function _refreshGraphAvailabilityState() {
-  const loadInfo = _getGraphPersistenceSnapshot();
+function _refreshGraphAvailabilityState(loadInfo = _getGraphPersistenceSnapshot()) {
   const banner = document.getElementById("bme-action-guard-banner");
   const graphOverlay = document.getElementById("bme-graph-overlay");
   const graphOverlayText = document.getElementById("bme-graph-overlay-text");
@@ -14384,9 +14386,8 @@ function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
   void _refreshCloudBackupManualUi(settings);
 }
 
-function _refreshRuntimeStatus() {
+function _refreshRuntimeStatus(graphPersistence = _getGraphPersistenceSnapshot()) {
   const runtimeStatus = _getRuntimeStatus?.() || {};
-  const graphPersistence = _getGraphPersistenceSnapshot?.() || {};
   const upgradeState = graphPersistence.authorityUpgradeState || {};
   const text = formatUiStatusText(runtimeStatus) || t("status.idle");
   const meta = formatUiStatusMeta(runtimeStatus) || t("status.initial.runtime.detail");
@@ -14399,7 +14400,8 @@ function _refreshRuntimeStatus() {
   _setText("bme-panel-status", text);
   _setText("bme-cloud-storage-mode-help", uiCloudStorageModeHelpText(_getSettings?.()?.cloudStorageMode, graphPersistence.primaryStorageTier));
   _renderCloudStorageModeStatus(_getSettings?.() || {}, graphPersistence);
-  _refreshGraphAvailabilityState();
+  _refreshGraphAvailabilityState(graphPersistence);
+  return graphPersistence;
 }
 
 function _showActionProgressUi(label, meta = "请稍候…") {

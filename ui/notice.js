@@ -1,3 +1,5 @@
+import { createNoticeUpdateScheduler } from "./notice-update-scheduler.js";
+
 const STYLE_ID = "st-bme-notice-style";
 const HOST_ID = "st-bme-notice-host";
 
@@ -494,6 +496,14 @@ export function showManagedBmeNotice(input) {
   let closed = false;
   let closeTimer = null;
   let switching = false;
+  const updateScheduler = createNoticeUpdateScheduler({
+    apply(nextInput) {
+      if (closed) return;
+      currentInput = nextInput || {};
+      applyNoticeState(item, currentInput, progress);
+      scheduleAutoClose(currentInput);
+    },
+  });
 
   const clearCloseTimer = () => {
     if (!closeTimer) return;
@@ -503,6 +513,7 @@ export function showManagedBmeNotice(input) {
 
   const close = (reason = "programmatic") => {
     if (closed) return;
+    updateScheduler.cancel();
     clearCloseTimer();
     closed = true;
     try {
@@ -528,9 +539,10 @@ export function showManagedBmeNotice(input) {
 
   const update = (nextInput) => {
     if (closed) return;
-    currentInput = nextInput || {};
-    applyNoticeState(item, currentInput, progress);
-    scheduleAutoClose(currentInput);
+    clearCloseTimer();
+    updateScheduler.request(nextInput || {}, {
+      immediate: currentInput.busy === true && nextInput?.busy !== true,
+    });
   };
 
   applyNoticeState(item, currentInput, progress);

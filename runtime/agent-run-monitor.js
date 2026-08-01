@@ -405,8 +405,15 @@ export class AgentRunMonitor {
     };
   }
 
-  getUiSnapshot({ chatId = "", detailRunId = "", maxRuns = 24, maxEvents = 480 } = {}) {
+  getUiSnapshot({ chatId = "", detailRunId = "", maxRuns = 24, maxEvents = 480, activityOnly = false } = {}) {
     const normalizedChatId = String(chatId || "").trim();
+    if (activityOnly) {
+      let activeCount = 0;
+      for (const run of this.runs.values()) {
+        if (!run.terminal && (!normalizedChatId || run.chatId === normalizedChatId)) activeCount += 1;
+      }
+      return { revision: this.revision, updatedAt: this.updatedAt, activeCount, runs: [] };
+    }
     const sorted = [...this.runs.values()]
       .filter((run) => !normalizedChatId || run.chatId === normalizedChatId)
       .sort((left, right) => {

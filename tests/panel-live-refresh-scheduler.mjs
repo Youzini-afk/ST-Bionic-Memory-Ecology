@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 
 import {
+  buildTaskPipelineRefreshSignature,
   createPanelLiveRefreshScheduler,
+  scheduleAfterNextPaint,
   shouldRefreshPanelHeavyContent,
 } from "../ui/panel-live-refresh-scheduler.js";
 
@@ -9,6 +11,43 @@ assert.equal(shouldRefreshPanelHeavyContent({ extractionRunning: true, tabId: "d
 assert.equal(shouldRefreshPanelHeavyContent({ extractionRunning: true, tabId: "task", taskSectionId: "memory" }), false);
 assert.equal(shouldRefreshPanelHeavyContent({ extractionRunning: true, tabId: "task", taskSectionId: "agent" }), true);
 assert.equal(shouldRefreshPanelHeavyContent({ extractionRunning: false, tabId: "dashboard" }), true);
+
+{
+  const order = [];
+  let frame = null;
+  let timer = null;
+  scheduleAfterNextPaint(() => order.push("work"), {
+    requestFrame(callback) { frame = callback; return 1; },
+    scheduleTimer(callback) { timer = callback; return 2; },
+  });
+  assert.deepEqual(order, []);
+  frame();
+  assert.deepEqual(order, [], "first paint happens before deferred panel work");
+  timer();
+  assert.deepEqual(order, ["work"]);
+}
+
+{
+  const base = {
+    extraction: { color: "cyan", label: "Extracting", detail: "chunk one" },
+    batchStatus: { batchId: "batch-1", stageOutcomes: { core: "running" } },
+  };
+  assert.equal(
+    buildTaskPipelineRefreshSignature(base),
+    buildTaskPipelineRefreshSignature({
+      ...base,
+      extraction: { ...base.extraction, detail: "chunk two" },
+    }),
+    "stream previews must not rebuild the whole pipeline page",
+  );
+  assert.notEqual(
+    buildTaskPipelineRefreshSignature(base),
+    buildTaskPipelineRefreshSignature({
+      ...base,
+      batchStatus: { batchId: "batch-1", stageOutcomes: { core: "success" } },
+    }),
+  );
+}
 
 let now = 1_000;
 let active = true;
