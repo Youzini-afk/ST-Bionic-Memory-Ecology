@@ -38,6 +38,107 @@ export function normalizeOpenAICompatibleToolCalls(payload = {}) {
   });
 }
 
+function getStreamingToolCallDeltas(payload = {}) {
+  const choice = payload?.choices?.[0] || {};
+  const delta = choice?.delta || choice?.message || payload?.delta || payload?.message || {};
+  if (Array.isArray(delta?.tool_calls)) return delta.tool_calls;
+  if (Array.isArray(payload?.tool_calls)) return payload.tool_calls;
+  const legacyFunctionCall = delta?.function_call || payload?.function_call;
+  return legacyFunctionCall ? [{ index: 0, function: legacyFunctionCall }] : [];
+}
+
+function normalizeStreamIndex(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric >= 0 ? numeric : fallback;
+}
+
+/**
+ * Mutable request-local accumulator for OpenAI-compatible streamed tool calls.
+ * It is deliberately transport-only: callers persist only the final assembled
+ * assistant message, never one record per SSE delta.
+ */
+export function createOpenAICompatibleToolCallAccumulator() {
+  return {
+    calls: new Map(),
+    idToIndex: new Map(),
+  };
+}
+
+export function appendOpenAICompatibleToolCallDeltas(
+  accumulator,
+  payload = {},
+) {
+  if (!accumulator?.calls || !accumulator?.idToIndex) {
+    throw new TypeError("OpenAI-compatible tool-call accumulator is required");
+  }
+
+  const source = getStreamingToolCallDeltas(payload);
+  const appended = [];
+  source.forEach((toolCall, sourceIndex) => {
+    const incomingId = String(toolCall?.id || "");
+    const explicitIndex = Number.isInteger(Number(toolCall?.index))
+      ? Number(toolCall.index)
+      : null;
+    const knownIdIndex = incomingId && accumulator.idToIndex.has(incomingId)
+      ? accumulator.idToIndex.get(incomingId)
+      : null;
+    const index = normalizeStreamIndex(
+      explicitIndex ?? knownIdIndex,
+      sourceIndex,
+    );
+    const current = accumulator.calls.get(index) || {
+      index,
+      id: "",
+      type: "function",
+      name: "",
+      arguments: "",
+    };
+    if (incomingId && current.id && incomingId !== current.id) {
+      throw new Error(`streamed tool-call index ${index} changed id`);
+    }
+    if (incomingId) {
+      current.id = incomingId;
+      accumulator.idToIndex.set(incomingId, index);
+    }
+
+    const fn = toolCall?.function || toolCall || {};
+    const nameDelta = String(fn?.name ?? toolCall?.name ?? "");
+    const rawArgumentsDelta = fn?.arguments ?? toolCall?.arguments ?? "";
+    const argumentsDelta = typeof rawArgumentsDelta === "string"
+      ? rawArgumentsDelta
+      : JSON.stringify(rawArgumentsDelta ?? {});
+    current.type = String(toolCall?.type || current.type || "function");
+    current.name += nameDelta;
+    current.arguments += argumentsDelta;
+    accumulator.calls.set(index, current);
+    appended.push({
+      index,
+      id: incomingId,
+      type: current.type,
+      nameDelta,
+      argumentsDelta,
+    });
+  });
+  return appended;
+}
+
+export function materializeOpenAICompatibleToolCalls(accumulator) {
+  if (!accumulator?.calls) return [];
+  return [...accumulator.calls.values()]
+    .sort((left, right) => left.index - right.index)
+    .map((toolCall) => {
+      const name = String(toolCall.name || "");
+      const argumentsText = String(toolCall.arguments || "") || "{}";
+      return {
+        id: String(toolCall.id || `call_${toolCall.index}`),
+        type: "function",
+        name,
+        arguments: argumentsText,
+        function: { name, arguments: argumentsText },
+      };
+    });
+}
+
 export function buildOpenAICompatibleTransportMessages(messages = []) {
   return (Array.isArray(messages) ? messages : [])
     .map((message) => {
@@ -81,6 +182,5 @@ export function attachOpenAICompatibleTools(
   body.tools = clone(tools, []);
   body.tool_choice = toolChoice || "auto";
   body.enable_function_calling = true;
-  body.stream = false;
   return body;
 }

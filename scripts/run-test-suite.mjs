@@ -24,6 +24,7 @@ const PRODUCT_CONTRACT_TESTS = [
   "graph-steward-agent.mjs",
   "identity-resolver.mjs",
   "indexeddb-sync.mjs",
+  "llm-streaming.mjs",
   "luker-host-adapter.mjs",
   "memory-branch.mjs",
   "memory-changeset.mjs",

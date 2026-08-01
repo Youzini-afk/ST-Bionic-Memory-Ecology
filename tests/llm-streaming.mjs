@@ -83,10 +83,14 @@ if (originalSendOpenAIRequest === undefined) {
   globalThis.__llmStreamingSendOpenAIRequest = originalSendOpenAIRequest;
 }
 
-function buildStreamingSettings(generation = {}, overrides = {}) {
+function buildStreamingSettings(
+  generation = {},
+  overrides = {},
+  taskType = "extract_objective",
+) {
   const taskProfiles = createDefaultTaskProfiles();
-  taskProfiles.extract_objective.profiles[0].generation = {
-    ...taskProfiles.extract_objective.profiles[0].generation,
+  taskProfiles[taskType].profiles[0].generation = {
+    ...taskProfiles[taskType].profiles[0].generation,
     ...generation,
   };
   return {
@@ -126,13 +130,18 @@ function getSnapshot(taskKey = "extract_objective") {
   return globalThis.__stBmeRuntimeDebugState?.taskLlmRequests?.[taskKey] || null;
 }
 
-async function withStreamingSettings(generation, run, overrides = {}) {
+async function withStreamingSettings(
+  generation,
+  run,
+  overrides = {},
+  taskType = "extract_objective",
+) {
   const previousSettings = JSON.parse(
     JSON.stringify(extensionsApi.extension_settings.st_bme || {}),
   );
   extensionsApi.extension_settings.st_bme = {
     ...previousSettings,
-    ...buildStreamingSettings(generation, overrides),
+    ...buildStreamingSettings(generation, overrides, taskType),
   };
   delete globalThis.__stBmeRuntimeDebugState;
 
@@ -140,6 +149,166 @@ async function withStreamingSettings(generation, run, overrides = {}) {
     await run();
   } finally {
     extensionsApi.extension_settings.st_bme = previousSettings;
+  }
+}
+
+async function testAgentStreamingAssemblesMixedToolCalls() {
+  const originalFetch = globalThis.fetch;
+  let requestBody = null;
+  const progress = [];
+
+  globalThis.fetch = async (_url, options = {}) => {
+    requestBody = JSON.parse(String(options.body || "{}"));
+    return createSseResponse([
+      {
+        choices: [{
+          delta: {
+            content: "I will inspect memory. ",
+            reasoning_content: "Need evidence. ",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call-search",
+                type: "function",
+                function: { name: "recall_", arguments: '{"query":"' },
+              },
+              {
+                index: 1,
+                id: "call-get",
+                type: "function",
+                function: { name: "recall_", arguments: '{"id":"' },
+              },
+            ],
+          },
+        }],
+      },
+      {
+        choices: [{
+          delta: {
+            content: "Searching now.",
+            reasoning: "Compare both results.",
+            tool_calls: [
+              {
+                index: 1,
+                function: { name: "get", arguments: 'node-2"}' },
+              },
+              {
+                index: 0,
+                function: { name: "search", arguments: 'clock tower"}' },
+              },
+            ],
+          },
+        }],
+      },
+      {
+        choices: [{ finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42 },
+      },
+      "[DONE]",
+    ]);
+  };
+
+  try {
+    await withStreamingSettings(
+      { stream: true, request_thoughts: true },
+      async () => {
+        const result = await llm.callBmeAgentModel({
+          messages: [{ role: "user", content: "Find the relevant memory." }],
+          tools: [
+            { type: "function", function: { name: "recall_search", parameters: { type: "object" } } },
+            { type: "function", function: { name: "recall_get", parameters: { type: "object" } } },
+          ],
+          taskType: "agent_recall",
+          requestSource: "test:agent-stream-tools",
+          onStreamProgress: (event) => progress.push(event),
+        });
+
+        assert.equal(requestBody?.stream, true);
+        assert.equal(requestBody?.tools?.length, 2);
+        assert.equal(result.content, "I will inspect memory. Searching now.");
+        assert.equal(result.reasoningContent, "Need evidence. Compare both results.");
+        assert.deepEqual(
+          result.toolCalls.map(({ id, name, arguments: args }) => ({ id, name, args })),
+          [
+            { id: "call-search", name: "recall_search", args: '{"query":"clock tower"}' },
+            { id: "call-get", name: "recall_get", args: '{"id":"node-2"}' },
+          ],
+        );
+        assert.equal(result.finishReason, "tool_calls");
+        assert.equal(result.usage.total_tokens, 42);
+        assert.ok(progress.some((event) => event.reasoningDelta));
+        assert.ok(progress.some((event) => event.toolCallDeltas?.length === 2));
+        assert.equal(progress.at(-1).toolCalls.length, 2);
+
+        const snapshot = getSnapshot("agent_recall");
+        assert.equal(snapshot.streamRequested, true);
+        assert.equal(snapshot.streamCompleted, true);
+        assert.equal(snapshot.streamToolCallCount, 2);
+        assert.ok(snapshot.streamReceivedReasoningChars > 0);
+      },
+      {},
+      "agent_recall",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function testAgentToolStreamingFallsBackToNonStream() {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    if (fetchCount === 1) {
+      return new Response(
+        JSON.stringify({ error: { message: "Tool streaming is not supported" } }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{
+          message: {
+            content: "",
+            tool_calls: [{
+              id: "fallback-call",
+              type: "function",
+              function: { name: "recall_search", arguments: '{"query":"fallback"}' },
+            }],
+          },
+          finish_reason: "tool_calls",
+        }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  try {
+    await withStreamingSettings(
+      { stream: true },
+      async () => {
+        const result = await llm.callBmeAgentModel({
+          messages: [{ role: "user", content: "Search." }],
+          tools: [{
+            type: "function",
+            function: { name: "recall_search", parameters: { type: "object" } },
+          }],
+          taskType: "agent_recall",
+          requestSource: "test:agent-stream-fallback",
+        });
+        assert.equal(fetchCount, 2);
+        assert.equal(result.toolCalls.length, 1);
+        assert.equal(result.toolCalls[0].id, "fallback-call");
+        const snapshot = getSnapshot("agent_recall");
+        assert.equal(snapshot.streamFallback, true);
+        assert.equal(snapshot.streamFallbackSucceeded, true);
+      },
+      {},
+      "agent_recall",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 }
 
@@ -553,6 +722,8 @@ await testDedicatedStreamingSuccess();
 await testDedicatedStreamingFallsBackToNonStream();
 await testDedicatedStreamingAbortDoesNotLeaveActiveState();
 await testDedicatedStreamingIdleTimeoutCancelsReader();
+await testAgentStreamingAssemblesMixedToolCalls();
+await testAgentToolStreamingFallsBackToNonStream();
 await testJsonRetryKeepsProfileCompletionTokens();
 await testAnthropicRouteUsesReverseProxyAndDisablesStreaming();
 

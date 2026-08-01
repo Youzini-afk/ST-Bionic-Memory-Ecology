@@ -194,6 +194,8 @@ assert.notEqual(
 );
 assert.match(defaults.agent_recall.profiles[0].blocks[0].content, /独立的任务、策略和提示词/);
 assert.match(defaults.agent_steward.profiles[0].blocks[0].content, /不读取也不执行任何 Workflow 任务预设/);
+assert.equal(defaults.agent_recall.profiles[0].generation.stream, true);
+assert.equal(defaults.agent_steward.profiles[0].generation.stream, true);
 assert.deepEqual(
   defaults.planner.profiles[0].blocks.map((block) => block.sourceKey || block.id),
   [

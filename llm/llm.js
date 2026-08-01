@@ -15,8 +15,11 @@ import { getActiveTaskProfile } from "../prompting/prompt-profiles.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import {
+  appendOpenAICompatibleToolCallDeltas,
   attachOpenAICompatibleTools,
   buildOpenAICompatibleTransportMessages,
+  createOpenAICompatibleToolCallAccumulator,
+  materializeOpenAICompatibleToolCalls,
   normalizeOpenAICompatibleToolCalls,
 } from "./openai-tool-protocol.js";
 
@@ -281,6 +284,14 @@ function buildCompactLlmDebugSnapshot(snapshot = {}) {
       snapshot?.streamFinishReason != null
         ? String(snapshot.streamFinishReason || "")
         : undefined,
+    streamReceivedReasoningChars: Number.isFinite(
+      Number(snapshot?.streamReceivedReasoningChars),
+    )
+      ? Number(snapshot.streamReceivedReasoningChars)
+      : undefined,
+    streamToolCallCount: Number.isFinite(Number(snapshot?.streamToolCallCount))
+      ? Number(snapshot.streamToolCallCount)
+      : undefined,
     streamPreviewText:
       snapshot?.streamPreviewText != null ||
       snapshot?.streamTextPreview != null ||
@@ -432,6 +443,8 @@ function preserveStreamingDebugFields(previousSnapshot = {}, nextSnapshot = {}) 
     "streamFinishedAt",
     "streamChunkCount",
     "streamReceivedChars",
+    "streamReceivedReasoningChars",
+    "streamToolCallCount",
     "streamPreviewText",
     "streamFinishReason",
     "streamLastEventAt",
@@ -874,6 +887,8 @@ function createStreamDebugState({
     finishedAt: "",
     chunkCount: 0,
     receivedChars: 0,
+    receivedReasoningChars: 0,
+    streamedToolCallCount: 0,
     previewText: "",
     finishReason: "",
     lastEventAt: "",
@@ -893,6 +908,10 @@ function buildStreamDebugSnapshot(streamState = {}) {
     streamFinishedAt: String(streamState.finishedAt || ""),
     streamChunkCount: Number(streamState.chunkCount || 0),
     streamReceivedChars: Number(streamState.receivedChars || 0),
+    streamReceivedReasoningChars: Number(
+      streamState.receivedReasoningChars || 0,
+    ),
+    streamToolCallCount: Number(streamState.streamedToolCallCount || 0),
     streamPreviewText: String(streamState.previewText || ""),
     streamFinishReason: String(streamState.finishReason || ""),
     streamLastEventAt: String(streamState.lastEventAt || ""),
@@ -1674,7 +1693,9 @@ async function parseDedicatedStreamingResponse(
   let content = "";
   let reasoningContent = "";
   let finishReason = "";
+  let usage = null;
   let sawStreamEvent = false;
+  const toolCallAccumulator = createOpenAICompatibleToolCallAccumulator();
 
   streamState.active = true;
   streamState.completed = false;
@@ -1792,7 +1813,23 @@ async function parseDedicatedStreamingResponse(
 
         const deltaText = extractStreamingContentDelta(parsed);
         const reasoningDelta = extractStreamingReasoningDelta(parsed);
+        let toolCallDeltas = [];
+        try {
+          toolCallDeltas = appendOpenAICompatibleToolCallDeltas(
+            toolCallAccumulator,
+            parsed,
+          );
+        } catch (error) {
+          throw createStreamHandlingError(
+            error?.message || "Dedicated LLM returned conflicting streamed tool calls",
+            "invalid_stream_tool_call",
+          );
+        }
         const nextFinishReason = extractStreamingFinishReason(parsed);
+        const nextUsage = parsed?.usage || extractStreamingChoice(parsed)?.usage;
+        if (nextUsage && typeof nextUsage === "object") {
+          usage = cloneRuntimeDebugValue(nextUsage, usage);
+        }
 
         if (deltaText) {
           content += deltaText;
@@ -1801,19 +1838,36 @@ async function parseDedicatedStreamingResponse(
             streamState.previewText,
             deltaText,
           );
-          if (typeof onStreamProgress === "function") {
-            try {
-              onStreamProgress({
-                previewText: streamState.previewText,
-                chunkCount: streamState.chunkCount,
-                receivedChars: streamState.receivedChars,
-              });
-            } catch {}
-          }
         }
 
         if (reasoningDelta) {
           reasoningContent += reasoningDelta;
+          streamState.receivedReasoningChars += reasoningDelta.length;
+        }
+
+        if (toolCallDeltas.length > 0) {
+          streamState.streamedToolCallCount =
+            materializeOpenAICompatibleToolCalls(toolCallAccumulator).length;
+        }
+
+        if (
+          typeof onStreamProgress === "function" &&
+          (deltaText || reasoningDelta || toolCallDeltas.length > 0)
+        ) {
+          try {
+            onStreamProgress({
+              previewText: streamState.previewText,
+              chunkCount: streamState.chunkCount,
+              receivedChars: streamState.receivedChars,
+              receivedReasoningChars: streamState.receivedReasoningChars,
+              contentDelta: deltaText,
+              reasoningDelta,
+              toolCallDeltas,
+              toolCalls: materializeOpenAICompatibleToolCalls(
+                toolCallAccumulator,
+              ),
+            });
+          } catch {}
         }
 
         if (nextFinishReason) {
@@ -1843,8 +1897,10 @@ async function parseDedicatedStreamingResponse(
 
     return {
       content: String(content || "").trim(),
+      toolCalls: materializeOpenAICompatibleToolCalls(toolCallAccumulator),
       finishReason: String(finishReason || ""),
       reasoningContent: String(reasoningContent || ""),
+      usage,
       raw: {
         mode: "stream",
         chunkCount: streamState.chunkCount,
@@ -2205,7 +2261,6 @@ async function callDedicatedOpenAICompatible(
   }
   if (Array.isArray(tools) && tools.length > 0) {
     body.enable_function_calling = true;
-    body.stream = false;
   }
 
   if (Object.prototype.hasOwnProperty.call(filteredGeneration, "request_thoughts")) {
@@ -2335,9 +2390,10 @@ async function _parseResponse(response) {
 }
 
 /**
- * Strict, non-streaming BME-owned model transport for the Agent runtime.
+ * Strict BME-owned model transport for the Agent runtime.
  * Unlike callLLM, this never falls back to the active SillyTavern chat model
- * and never converts provider failures into null.
+ * and never converts provider failures into null. Streaming follows the
+ * Agent task profile and assembles tool-call deltas before execution.
  */
 export async function callBmeAgentModel({
   messages = [],
@@ -2348,6 +2404,7 @@ export async function callBmeAgentModel({
   maxContextTokens = null,
   taskType = "",
   requestSource = "agent:bme",
+  onStreamProgress = null,
 } = {}) {
   const override = getLlmTestOverride("callBmeAgentModel");
   if (override) {
@@ -2360,6 +2417,7 @@ export async function callBmeAgentModel({
       maxContextTokens,
       taskType,
       requestSource,
+      onStreamProgress,
     });
   }
   return await callDedicatedOpenAICompatible(messages, {
@@ -2373,7 +2431,7 @@ export async function callBmeAgentModel({
     tools,
     toolChoice,
     requireDedicated: true,
-    forceNonStream: true,
+    onStreamProgress,
   });
 }
 
