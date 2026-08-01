@@ -1210,7 +1210,12 @@ export async function persistExtractionBatchResultImpl(runtime, {
 
 export async function persistDetachedGraphSnapshotImpl(
   runtime,
-  { graph = null, reason = "detached-graph-snapshot", context = null } = {},
+  {
+    graph = null,
+    reason = "detached-graph-snapshot",
+    context = null,
+    targetChatId = "",
+  } = {},
 ) {
   const activeContext = context || runtime.getContext?.();
   if (!activeContext || !graph || typeof graph !== "object") {
@@ -1223,7 +1228,11 @@ export async function persistDetachedGraphSnapshotImpl(
     });
   }
 
-  const chatId = runtime.resolvePersistenceChatId(activeContext, graph);
+  const chatId = runtime.resolvePersistenceChatId(
+    activeContext,
+    graph,
+    targetChatId,
+  );
   if (!chatId) {
     return runtime.buildGraphPersistResult({
       saved: false,

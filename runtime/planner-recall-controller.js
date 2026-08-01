@@ -53,20 +53,39 @@ export async function runPlannerRecallForEnaController(runtime = {}, {
     if (graph && runtime.getCurrentGraph() !== graph) {
       throw runtime.createAbortError("Ena Planner graph changed");
     }
+    if (runtime.isHistoryRollbackPending?.()) {
+      throw runtime.createAbortError("Ena Planner history rollback pending");
+    }
+    if (runtime.isRestoreLockActive?.()) {
+      throw runtime.createAbortError("Ena Planner restore lock active");
+    }
   };
 
-  if (runtime.isGraphMetadataWriteAllowed()) {
+  if (runtime.isRestoreLockActive?.()) {
+    return {
+      ok: false,
+      reason: "restore-lock-active",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (
+    runtime.isHistoryRollbackPending?.() ||
+    runtime.isGraphMetadataWriteAllowed()
+  ) {
     const recovered = await runtime.recoverHistoryIfNeeded("pre-ena-planner-recall");
-    assertRunCurrent();
     if (!recovered) {
       return {
         ok: false,
-        reason: "history-recovery-not-ready",
+        reason: "history-rollback-not-ready",
         memoryBlock: "",
         recentMessages: [],
         result: null,
       };
     }
+    assertRunCurrent();
   }
 
   const currentGraph = runtime.getCurrentGraph();

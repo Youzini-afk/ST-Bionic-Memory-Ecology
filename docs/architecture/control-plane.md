@@ -45,7 +45,7 @@
 
 跨 `await`、timer 或后台回调的任务在开始时捕获 session lease，发布运行图谱、更新 UI 或写宿主 chat-state 前再次校验。耐久层可以继续完成发起聊天的 detached 写入，但 lease 失效后不得修改后来活动的聊天。
 
-提取与历史恢复还捕获聊天内容 fingerprint。session lease 防跨聊天晚到，history fingerprint 防同一聊天在异步任务期间再次编辑；任一失效都不能发布 working graph。
+提取事务捕获聊天内容 fingerprint；楼层回滚捕获不含正文和插件附件的结构 fingerprint。session lease 防跨聊天晚到，结构 fingerprint 防同一聊天在异步回滚期间再次增删或换 swipe；任一失效都不能发布 working graph。
 
 ## 持久化确认状态机
 
@@ -109,7 +109,7 @@ no-new-user 的稳定路径分两段：
 1. `GENERATION_AFTER_COMMANDS` 不做召回计算，直接跳过并把工作推迟到 before-combine。
 2. `GENERATE_BEFORE_COMBINE_PROMPTS` 先调用 `reapplyPersistedRecallBlock`，从父 user 楼层的 `message.extra.bme_recall` 确定性重放召回块；命中后立即返回，不进入 transaction / `runRecall`。若没有记录或记录已陈旧，再落回既有 transaction + compute 兼容路径。
 
-overswipe 的空 assistant 占位不触发空文本回滚/提取。它只留下 durable `awaiting-replacement` checkpoint；替换回复到达后，自动历史恢复负责回滚旧图谱效果并重放，新代际仍复用父 user 的持久召回。
+overswipe 的空 assistant 占位不触发空文本回滚/提取。它只留下 durable `awaiting-replacement` checkpoint；替换回复到达后先确定性回滚旧图谱效果，新回复再走独立提取事务，新代际仍复用父 user 的持久召回。
 
 旧的召回事务机制仍保留为 fresh normal 和 fallback compute 的基础设施；它不再是 reroll 已存召回注入的唯一门闸。
 

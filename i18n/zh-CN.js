@@ -447,12 +447,12 @@ export default {
   "recall.planner.state": "任务状态",
 
   "stage.extraction": "提取",
-  "stage.history": "历史恢复",
+  "stage.history": "楼层回滚",
   "stage.recall": "召回",
   "stage.vector": "向量",
   "stageNotice.title.extraction": "ST-BME 提取",
   "stageNotice.title.generic": "ST-BME",
-  "stageNotice.title.history": "ST-BME 历史恢复",
+  "stageNotice.title.history": "ST-BME 楼层回滚",
   "stageNotice.title.recall": "ST-BME 召回",
   "stageNotice.title.vector": "ST-BME 向量",
 

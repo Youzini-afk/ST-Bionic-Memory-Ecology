@@ -1117,6 +1117,8 @@ const lateRecallGraphB = { nodes: [], edges: [] };
 let activeRecallContext = { chat: lateRecallChatA, chatId: "chat-a" };
 let activeRecallGraph = lateRecallGraphA;
 let activeRecallEpoch = 1;
+let activeRecallPromise = null;
+let recallBusy = false;
 const lateRecallStatuses = [];
 const lateRecallRuntime = {
   ...rerollRuntime,
@@ -1140,6 +1142,13 @@ const lateRecallRuntime = {
     return error;
   },
   isAbortError: (error) => error?.name === "AbortError",
+  setIsRecalling: (value) => {
+    recallBusy = value === true;
+  },
+  setActiveRecallPromise: (value) => {
+    activeRecallPromise = value;
+  },
+  getActiveRecallPromise: () => activeRecallPromise,
   retrieve: async () => {
     notifyLateRecallStarted();
     return await new Promise((resolve) => {
@@ -1164,6 +1173,9 @@ await lateRecallStarted;
 activeRecallEpoch += 1;
 activeRecallContext = { chat: lateRecallChatB, chatId: "chat-a" };
 activeRecallGraph = lateRecallGraphB;
+const chatBRecallPromise = Promise.resolve({ status: "running" });
+activeRecallPromise = chatBRecallPromise;
+recallBusy = true;
 const statusCountAtChatSwitch = lateRecallStatuses.length;
 releaseLateRecall({
   injectionText: "late-a",
@@ -1174,6 +1186,8 @@ assert.equal(lateRecallResult.status, "aborted");
 assert.equal(lateRecallResult.reason, "recall-context-changed");
 assert.equal(lateRecallApplyCalls, 0);
 assert.equal(lateRecallStatuses.length, statusCountAtChatSwitch);
+assert.equal(activeRecallPromise, chatBRecallPromise);
+assert.equal(recallBusy, true, "late chat A finally must not clear chat B recall busy state");
 
 console.log("  ✓ late recall completion cannot inject into a newly selected chat");
 console.log("recall-reroll-reuse tests passed");

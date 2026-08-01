@@ -29,6 +29,7 @@ export function createConversationWorkspace({
     lastVectorStatus: createStatus("vector"),
     lastRecallStatus: createStatus("recall"),
     isRecoveringHistory: false,
+    historyRecoveryCoordinator: null,
     hostGeneration: {
       running: false,
       endedAt: 0,
@@ -70,6 +71,7 @@ export function createConversationWorkspace({
   }
 
   function resetConversationState() {
+    workspace.historyRecoveryCoordinator?.clear?.("conversation-changed");
     clearConversationTimers();
     workspace.graph = null;
     workspace.graphPersistenceState = createPersistenceState();
@@ -86,6 +88,7 @@ export function createConversationWorkspace({
     workspace.lastVectorStatus = createStatus("vector");
     workspace.lastRecallStatus = createStatus("recall");
     workspace.isRecoveringHistory = false;
+    workspace.historyRecoveryCoordinator = null;
     workspace.hostGeneration.running = false;
     workspace.hostGeneration.endedAt = 0;
     workspace.hostGeneration.skipBeforeCombineRecallUntil = 0;

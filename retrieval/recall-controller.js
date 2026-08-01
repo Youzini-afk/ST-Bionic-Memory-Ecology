@@ -556,6 +556,27 @@ export async function runRecallController(runtime, options = {}) {
   recallInput.deliveryMode =
     String(options.deliveryMode || "immediate").trim() || "immediate";
 
+  const isHistoryRollbackPending = () =>
+    typeof runtime.isHistoryRollbackPending === "function" &&
+    runtime.isHistoryRollbackPending();
+  const isReadableForRecall =
+    typeof runtime.isGraphReadableForRecall === "function"
+      ? runtime.isGraphReadableForRecall()
+      : runtime.isGraphReadable();
+  if (!isReadableForRecall) {
+    const reason = runtime.getGraphMutationBlockReason("召回");
+    runtime.setLastRecallStatus("等待图谱加载", reason, "warning", {
+      syncRuntime: true,
+    });
+    return runtime.createRecallRunResult("skipped", {
+      reason,
+    });
+  }
+  if (isHistoryRollbackPending()) {
+    return runtime.createRecallRunResult("skipped", {
+      reason: "楼层回滚尚未完成",
+    });
+  }
   const cachedRecallPayload =
     options.cachedRecallPayload && typeof options.cachedRecallPayload === "object"
       ? options.cachedRecallPayload
@@ -663,25 +684,17 @@ export async function runRecallController(runtime, options = {}) {
     });
   }
 
-  const isReadableForRecall =
-    typeof runtime.isGraphReadableForRecall === "function"
-      ? runtime.isGraphReadableForRecall()
-      : runtime.isGraphReadable();
-  if (!isReadableForRecall) {
-    const reason = runtime.getGraphMutationBlockReason("召回");
-    runtime.setLastRecallStatus("等待图谱加载", reason, "warning", {
-      syncRuntime: true,
-    });
-    return runtime.createRecallRunResult("skipped", {
-      reason,
-    });
-  }
   if (runtime.isGraphMetadataWriteAllowed()) {
     if (!(await runtime.recoverHistoryIfNeeded("pre-recall"))) {
       return runtime.createRecallRunResult("skipped", {
-        reason: "历史恢复未就绪",
+        reason: "楼层回滚未就绪",
       });
     }
+  }
+  if (isHistoryRollbackPending()) {
+    return runtime.createRecallRunResult("skipped", {
+      reason: "楼层回滚尚未完成",
+    });
   }
 
   if (!isRecallContextCurrent()) {
@@ -716,7 +729,11 @@ export async function runRecallController(runtime, options = {}) {
 
     try {
       await runtime.ensureVectorReadyIfNeeded("pre-recall", recallSignal);
-      if (recallSignal.aborted || !isRecallContextCurrent()) {
+      if (
+        recallSignal.aborted ||
+        !isRecallContextCurrent() ||
+        isHistoryRollbackPending()
+      ) {
         throw runtime.createAbortError("recall-context-changed");
       }
 
@@ -769,7 +786,11 @@ export async function runRecallController(runtime, options = {}) {
         options: runtime.buildRecallRetrieveOptions(settings, context),
       });
 
-      if (recallSignal.aborted || !isRecallContextCurrent()) {
+      if (
+        recallSignal.aborted ||
+        !isRecallContextCurrent() ||
+        isHistoryRollbackPending()
+      ) {
         throw runtime.createAbortError("recall-context-changed");
       }
 
@@ -836,8 +857,8 @@ export async function runRecallController(runtime, options = {}) {
       });
     } finally {
       runtime.finishStageAbortController("recall", recallController);
-      runtime.setIsRecalling(false);
       if (runtime.getActiveRecallPromise() === recallPromise) {
+        runtime.setIsRecalling(false);
         runtime.setActiveRecallPromise(null);
       }
       runtime.refreshPanelLiveState();

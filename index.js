@@ -197,6 +197,7 @@ import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
+import { createHistoryRecoveryCoordinator } from "./runtime/history-recovery-coordinator.js";
 import { createAgentRunMonitor } from "./runtime/agent-run-monitor.js";
 import { createAgentBackgroundPresentation, createMemoryTaskPresentationBindings } from "./runtime/task-presentation.js";
 import { runGraphStewardAgent } from "./application/graph-steward-agent.js";
@@ -997,11 +998,19 @@ function allocateRequestedPersistRevision(
   return Math.max(1, resolvePersistRevisionFloor(requestedRevision, graph) + 1);
 }
 
+let restoreLockOwnerSequence = 0;
+
 function normalizeRestoreLockState(lock = null) {
   const source = String(lock?.source || "").trim();
   const reason = String(lock?.reason || "").trim();
   const startedAt = Number(lock?.startedAt);
-  const depth = Math.max(0, Math.floor(Number(lock?.depth) || 0));
+  const owners = Array.isArray(lock?.owners)
+    ? [...new Set(lock.owners.map((owner) => String(owner || "").trim()).filter(Boolean))]
+    : [];
+  const depth = Math.max(
+    owners.length,
+    Math.max(0, Math.floor(Number(lock?.depth) || 0)),
+  );
   const active = lock?.active === true || depth > 0;
   return {
     active,
@@ -1009,6 +1018,7 @@ function normalizeRestoreLockState(lock = null) {
     source,
     reason,
     startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : 0,
+    owners,
   };
 }
 
@@ -1025,31 +1035,50 @@ function getRestoreLockMessage(operationLabel = "当前操作") {
 
 function enterRestoreLock(source = "runtime", reason = "") {
   const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
+  const owner = {
+    id: `restore-lock:${Date.now()}:${++restoreLockOwnerSequence}`,
+    source: String(source || currentLock.source || "runtime"),
+  };
   const nextLock = {
     active: true,
     depth: currentLock.depth + 1,
-    source: String(source || currentLock.source || "runtime"),
+    source: owner.source,
     reason: String(reason || currentLock.reason || ""),
     startedAt: currentLock.startedAt || Date.now(),
+    owners: [...currentLock.owners, owner.id],
   };
   updateGraphPersistenceState({
     restoreLock: nextLock,
   });
-  return cloneRuntimeDebugValue(nextLock, nextLock);
+  return owner;
 }
 
-function leaveRestoreLock(source = "runtime") {
+function leaveRestoreLock(ownerOrSource = "runtime") {
   const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
   if (!currentLock.active) {
     return currentLock;
   }
+  const ownerId =
+    ownerOrSource && typeof ownerOrSource === "object"
+      ? String(ownerOrSource.id || "").trim()
+      : "";
+  if (ownerId && !currentLock.owners.includes(ownerId)) {
+    return currentLock;
+  }
+  const nextOwners = ownerId
+    ? currentLock.owners.filter((candidate) => candidate !== ownerId)
+    : currentLock.owners;
   const nextDepth = Math.max(0, currentLock.depth - 1);
   const nextLock =
     nextDepth > 0
       ? {
           ...currentLock,
           depth: nextDepth,
-          source: String(source || currentLock.source || ""),
+          source:
+            typeof ownerOrSource === "string"
+              ? String(ownerOrSource || currentLock.source || "")
+              : currentLock.source,
+          owners: nextOwners,
         }
       : {
           active: false,
@@ -1057,6 +1086,7 @@ function leaveRestoreLock(source = "runtime") {
           source: "",
           reason: "",
           startedAt: 0,
+          owners: [],
         };
   updateGraphPersistenceState({
     restoreLock: nextLock,
@@ -1065,11 +1095,11 @@ function leaveRestoreLock(source = "runtime") {
 }
 
 async function runWithRestoreLock(source, reason, task) {
-  enterRestoreLock(source, reason);
+  const owner = enterRestoreLock(source, reason);
   try {
     return await task();
   } finally {
-    leaveRestoreLock(source);
+    leaveRestoreLock(owner);
   }
 }
 
@@ -1957,7 +1987,7 @@ const autoExtractionDeferRuntime = createAutoExtractionDefer({
   getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
   getIsExtracting: () => conversationWorkspace.isExtracting,
   getIsHostGenerationRunning: () => conversationWorkspace.hostGeneration.running,
-  getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
+  getIsRecoveringHistory: isHistoryRecoveryBusy,
   getLastHostGenerationEndedAt: () => conversationWorkspace.hostGeneration.endedAt,
   getSettings,
   isAssistantChatMessage: (...args) => isAssistantChatMessage(...args),
@@ -4946,7 +4976,7 @@ function assertRecoveryHistoryStillCurrent(
   const activeFingerprint = buildChatHistoryFingerprint(getContext()?.chat);
   if (activeFingerprint === expectedHistoryFingerprint) return true;
   throw createAbortError(
-    `历史恢复期间聊天内容再次变化${label ? ` (${label})` : ""}`,
+    `楼层回滚期间聊天内容再次变化${label ? ` (${label})` : ""}`,
   );
 }
 
@@ -4959,7 +4989,7 @@ function getStageAbortLabel(stage) {
     case "recall":
       return "召回";
     case "history":
-      return "历史恢复";
+      return "楼层回滚";
     default:
       return "当前流程";
   }
@@ -4994,11 +5024,28 @@ function findAbortableStageForNotice(stage) {
   return null;
 }
 
-function abortStage(stage) {
+function abortStage(stage, reason = "") {
   const controller = stageAbortControllers[stage];
   if (!controller || controller.signal.aborted) return false;
-  controller.abort(createAbortError(`${getStageAbortLabel(stage)}已终止`));
+  controller.abort(
+    createAbortError(
+      String(reason || "").trim() || `${getStageAbortLabel(stage)}已终止`,
+    ),
+  );
   return true;
+}
+
+function assertRecoveryStructureStillCurrent(
+  expectedChatId,
+  expectedStructureFingerprint,
+  label = "",
+) {
+  assertRecoveryChatStillActive(expectedChatId, label);
+  const activeFingerprint = buildChatStructureFingerprint(getContext()?.chat);
+  if (activeFingerprint === expectedStructureFingerprint) return true;
+  throw createAbortError(
+    `楼层回滚期间聊天结构再次变化${label ? ` (${label})` : ""}`,
+  );
 }
 
 function abortRecallStageWithReason(reason = "召回已终止") {
@@ -6540,7 +6587,7 @@ function getRenderLimitedHistoryRecoveryGuard(
 
 function notifyRenderLimitedHistoryRecoveryBlocked(guard, trigger = "") {
   if (!guard?.blocked) return;
-  console.warn?.("[ST-BME] 历史恢复因聊天渲染限制暂停:", {
+  console.warn?.("[ST-BME] 楼层回滚因聊天渲染限制暂停:", {
     trigger,
     chatLength: guard.chatLength,
     highestProcessedFloor: guard.highestProcessedFloor,
@@ -6548,7 +6595,7 @@ function notifyRenderLimitedHistoryRecoveryBlocked(guard, trigger = "") {
   });
   updateStageNotice(
     "history",
-    "历史恢复已暂停",
+    "楼层回滚已暂停",
     guard.message,
     "warning",
     {
@@ -14939,10 +14986,10 @@ function scheduleImmediateHistoryRecovery(
         refreshPanelLiveState();
       })
       .catch((error) => {
-        console.error("[ST-BME] 事件触发的历史恢复失败:", error);
+        console.error("[ST-BME] 事件触发的楼层回滚失败:", error);
         updateStageNotice(
           "history",
-          "历史恢复失败",
+          "楼层回滚失败",
           error?.message || String(error),
           "error",
           {
@@ -14950,7 +14997,7 @@ function scheduleImmediateHistoryRecovery(
             persist: false,
           },
         );
-        toastr.error(`历史恢复失败: ${error?.message || error}`);
+        toastr.error(`楼层回滚失败: ${error?.message || error}`);
       });
   }, delayMs);
 }
@@ -14963,6 +15010,12 @@ function scheduleHistoryMutationRecheck(
   if (!getSettings().enabled) return;
 
   const scheduledChatId = getCurrentChatId();
+  clearPendingAutoExtraction();
+  abortGraphStewardWorkers("history-mutation");
+  abortStage("extraction", "楼层已变化，旧提取事务已终止");
+  abortStage("vector", "楼层已变化，旧向量事务已终止");
+  backgroundVectorSyncCoalescer.clear("history-mutation");
+  const rollbackRequest = requestHistoryRollback(`event:${trigger}`);
   clearPendingHistoryMutationChecks();
   clearTimeout(conversationWorkspace.timers.historyRecovery);
   conversationWorkspace.timers.historyRecovery = null;
@@ -15000,6 +15053,12 @@ function scheduleHistoryMutationRecheck(
         clearPendingHistoryMutationChecks();
         scheduleImmediateHistoryRecovery(trigger, 0);
       } else if (conversationWorkspace.timers.historyMutationChecks.length === 0) {
+        if (rollbackRequest?.revision) {
+          getHistoryRecoveryCoordinator().settlePending(
+            rollbackRequest.revision,
+            true,
+          );
+        }
         dismissStageNotice("history");
         refreshPanelLiveState();
       }
@@ -15496,13 +15555,70 @@ async function tryDeleteBackendVectorHashesForRecovery(
   }
 }
 
+function isHistoryRecoveryBusy() {
+  return Boolean(
+    conversationWorkspace.historyRecoveryCoordinator?.isBusy?.() ||
+      conversationWorkspace.isRecoveringHistory,
+  );
+}
+
+function hasUncommittedHistoryRollback() {
+  return Boolean(
+    isHistoryRecoveryBusy() ||
+      Number.isFinite(
+        conversationWorkspace.graph?.historyState?.historyDirtyFrom,
+      ),
+  );
+}
+
+function getHistoryRecoveryCoordinator() {
+  const existing = conversationWorkspace.historyRecoveryCoordinator;
+  if (existing) return existing;
+
+  let coordinator = null;
+  coordinator = createHistoryRecoveryCoordinator({
+    getCurrentChatId,
+    abortActive: (reason) => abortStage("history", reason),
+    runAttempt: ({ trigger }) =>
+      runHistoryRollbackAttempt(trigger, coordinator),
+  });
+  conversationWorkspace.historyRecoveryCoordinator = coordinator;
+  return coordinator;
+}
+
+function requestHistoryRollback(trigger = "history-change") {
+  return getHistoryRecoveryCoordinator().request(trigger, {
+    supersede: true,
+  });
+}
+
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
+  return await getHistoryRecoveryCoordinator().recover(trigger);
+}
+
+async function awaitHistoryRollbackBarrier() {
+  const coordinator = conversationWorkspace.historyRecoveryCoordinator;
+  if (coordinator) {
+    const settled = await coordinator.waitForCurrent();
+    if (settled !== true) return false;
+  }
+  return !Number.isFinite(
+    conversationWorkspace.graph?.historyState?.historyDirtyFrom,
+  );
+}
+
+async function runHistoryRollbackAttempt(
+  trigger = "history-recovery",
+  coordinator = getHistoryRecoveryCoordinator(),
+) {
   return await recoverHistoryIfNeededController(
     {
       applyRecoveryPlanToVectorState,
       assertRecoveryHistoryStillCurrent,
+      assertRecoveryStructureStillCurrent,
       beginStageAbortController,
       buildChatHistoryFingerprint,
+      buildChatStructureFingerprint,
       buildRecoveryResult,
       buildReverseJournalRecoveryPlan,
       clampRecoveryStartFloor,
@@ -15510,7 +15626,6 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       clearInjectionState,
       cloneGraphSnapshot,
       console,
-      createEmptyGraph,
       ensureCurrentGraphRuntimeState,
       enterRestoreLock,
       findJournalRecoveryPoint,
@@ -15518,64 +15633,36 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       getContext,
       getCurrentChatId,
       getCurrentGraph: () => conversationWorkspace.graph,
-      getEmbeddingConfig,
       getExtractionCount: () => conversationWorkspace.extractionCount,
-      getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
+      getIsRecoveringHistory: () => coordinator.isAttemptActive(),
       getRenderLimitedHistoryRecoveryGuard,
-      getSettings,
       inspectHistoryMutation,
       isAbortError,
-      isBackendVectorConfig,
       isRestoreLockActive,
       leaveRestoreLock,
       markHistoryDirty,
-      maybeResumePendingAutoExtraction,
       normalizeGraphRuntimeState,
       notifyRenderLimitedHistoryRecoveryBlocked,
       persistDetachedRecoveryGraph,
-      prepareVectorStateForReplay,
-      queueMicrotask: globalThis.queueMicrotask?.bind?.(globalThis),
       refreshPanelLiveState,
-      replayExtractionFromHistory,
       rollbackAffectedJournals,
       saveGraphToChat,
       setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
       setExtractionCount: (count) => { conversationWorkspace.extractionCount = count; },
-      setIsRecoveringHistory: (value) => { conversationWorkspace.isRecoveringHistory = value; },
-      settleExtractionStatusAfterHistoryRecovery,
+      setIsRecoveringHistory: (value) => {
+        coordinator.setAttemptActive(value);
+        if (conversationWorkspace.historyRecoveryCoordinator === coordinator) {
+          conversationWorkspace.isRecoveringHistory = value;
+        }
+      },
       throwIfAborted,
       toastr,
-      tryDeleteBackendVectorHashesForRecovery,
       updateProcessedHistorySnapshot,
       updateStageNotice,
     },
     { trigger },
   );
 }
-function settleExtractionStatusAfterHistoryRecovery(
-  text = "提取完成",
-  meta = "",
-  level = "success",
-) {
-  const statusSnapshot =
-    typeof conversationWorkspace.lastExtractionStatus === "object" && conversationWorkspace.lastExtractionStatus
-      ? conversationWorkspace.lastExtractionStatus
-      : null;
-  if (!statusSnapshot || typeof setLastExtractionStatus !== "function") {
-    return;
-  }
-
-  const currentText = String(statusSnapshot.text || "");
-  const currentLevel = String(statusSnapshot.level || "");
-  if (currentText !== "AI 生成中" && currentLevel !== "running") {
-    return;
-  }
-  setLastExtractionStatus(text, meta, level, {
-    syncRuntime: true,
-    toastKind: "",
-  });
-}
-
 /**
  * 提取管线：处理未提取的对话楼层
  */
@@ -15603,7 +15690,7 @@ async function runWorkflowExtraction() {
     getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
     getGraphMutationBlockReason,
     getIsExtracting: () => conversationWorkspace.isExtracting,
-    getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
+    getIsRecoveringHistory: isHistoryRecoveryBusy,
     getLastProcessedAssistantFloor,
     getSettings,
     getSmartTriggerDecision,
@@ -16215,11 +16302,13 @@ async function runPlannerRecallForEna({
       getSettings,
       isGraphMetadataWriteAllowed,
       isGraphReadableForRecall,
+      isHistoryRollbackPending: hasUncommittedHistoryRollback,
+      isRestoreLockActive,
       isConversationLeaseCurrent: (...args) =>
         conversationWorkspace.isLeaseCurrent(...args),
       isTrivialUserInput,
       normalizeRecallInputText,
-      recoverHistoryIfNeeded,
+      recoverHistoryIfNeeded: awaitHistoryRollbackBarrier,
       retrieve: retrieveForMemoryRuntime,
     },
     {
@@ -16233,6 +16322,20 @@ async function runPlannerRecallForEna({
  * 召回管线：检索并注入记忆
  */
 async function runRecall(options = {}) {
+  if (!options?.ignoreRestoreLock && hasUncommittedHistoryRollback()) {
+    const rollbackReady = await awaitHistoryRollbackBarrier();
+    if (!rollbackReady || hasUncommittedHistoryRollback()) {
+      setLastRecallStatus(
+        "召回已暂停",
+        "楼层回滚尚未完成，未读取未稳定的记忆图谱。",
+        "warning",
+        { syncRuntime: true },
+      );
+      return createRecallRunResult("skipped", {
+        reason: "history-rollback-not-ready",
+      });
+    }
+  }
   if (!options?.ignoreRestoreLock && isRestoreLockActive()) {
     const message = getRestoreLockMessage("召回");
     setLastRecallStatus("召回已暂停", message, "warning", {
@@ -16281,9 +16384,10 @@ async function runRecall(options = {}) {
       isGraphMetadataWriteAllowed,
       isGraphReadable,
       isGraphReadableForRecall,
+      isHistoryRollbackPending: hasUncommittedHistoryRollback,
       nextRecallRunSequence: () => ++conversationWorkspace.recallRunSequence,
       readPersistedRecallFromUserMessage,
-      recoverHistoryIfNeeded,
+      recoverHistoryIfNeeded: awaitHistoryRollbackBarrier,
       refreshPanelLiveState,
       resolveRecallInput,
       retrieve: retrieveForMemoryRuntime,

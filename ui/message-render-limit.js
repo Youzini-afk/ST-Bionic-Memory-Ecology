@@ -202,7 +202,7 @@ export function getRenderLimitedHistoryRecoveryGuard(
     reason: "render-limited-chat-slice",
     message:
       `当前聊天区最多只渲染最近 ${renderLimit} 条消息，当前可见 ${chatLength} 条；` +
-      `图谱已处理到楼层 ${highestProcessedFloor}。为避免把截断视图误判为历史删除并清空运行时图谱，已暂停历史恢复。` +
+      `图谱已处理到楼层 ${highestProcessedFloor}。为避免把截断视图误判为历史删除并清空运行时图谱，已暂停楼层回滚。` +
       "请临时关闭“限制聊天区渲染楼层”或调大渲染数量并刷新后再提取。",
   };
 }

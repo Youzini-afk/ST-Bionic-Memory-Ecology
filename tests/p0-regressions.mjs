@@ -8,7 +8,10 @@ import {
   installResolveHooks,
   toDataModuleUrl,
 } from "./helpers/register-hooks-compat.mjs";
-import { pruneProcessedMessageHashesFromFloor } from "../maintenance/chat-history.js";
+import {
+  applyRecoveryPlanToGraphVectorState,
+  pruneProcessedMessageHashesFromFloor,
+} from "../maintenance/chat-history.js";
 import {
   recoverHistoryIfNeededController,
   rollbackGraphForRerollController,
@@ -19,6 +22,7 @@ import {
   shouldAdvanceProcessedHistory,
 } from "../maintenance/extraction-success-controller.js";
 import { notifyHistoryDirtyNotice } from "../ui/history-notice.js";
+import { createHistoryRecoveryCoordinator } from "../runtime/history-recovery-coordinator.js";
 import { createRecallMessageUiController } from "../ui/recall-message-ui-controller.js";
 import {
   onBeforeCombinePromptsController,
@@ -187,6 +191,7 @@ const { consolidateMemories } = await import("../maintenance/consolidator.js");
 const { retrieve } = await import("../retrieval/retriever.js");
 const {
   buildChatHistoryFingerprint,
+  buildChatStructureFingerprint,
   createBatchJournalEntry,
   buildReverseJournalRecoveryPlan,
   detectHistoryMutation,
@@ -481,6 +486,7 @@ function createHistoryRecoveryHarness() {
   chat: [],
   clearedHistoryDirty: null,
   prepareVectorStateCalls: [],
+  applyRecoveryPlanCalls: [],
   saveGraphToChatCalls: 0,
   saveGraphToChatCallOptions: [],
   saveGraphToChatResults: [],
@@ -620,7 +626,12 @@ function createHistoryRecoveryHarness() {
       return await context.prepareVectorStateForReplayImpl(...args);
     }
   },
-  applyRecoveryPlanToVectorState() {},
+  applyRecoveryPlanToVectorState(...args) {
+    context.applyRecoveryPlanCalls.push(args);
+    if (typeof context.applyRecoveryPlanToVectorStateImpl === "function") {
+      return context.applyRecoveryPlanToVectorStateImpl(...args);
+    }
+  },
   async replayExtractionFromHistory(...args) {
     if (typeof context.replayExtractionFromHistoryImpl === "function") {
       return await context.replayExtractionFromHistoryImpl(...args);
@@ -695,6 +706,15 @@ function createHistoryRecoveryHarness() {
     }
     throw context.createAbortError("history-changed-during-recovery");
   },
+  assertRecoveryStructureStillCurrent(chatId, expectedFingerprint) {
+    if (
+      context.activeChatId === chatId &&
+      buildChatStructureFingerprint(context.chat) === expectedFingerprint
+    ) {
+      return true;
+    }
+    throw context.createAbortError("history-structure-changed-during-rollback");
+  },
   refreshPanelLiveState() {
     context.refreshPanelCalls += 1;
   },
@@ -716,8 +736,11 @@ function createHistoryRecoveryHarness() {
       context.applyRecoveryPlanToVectorState(...args),
     assertRecoveryHistoryStillCurrent: (...args) =>
       context.assertRecoveryHistoryStillCurrent(...args),
+    assertRecoveryStructureStillCurrent: (...args) =>
+      context.assertRecoveryStructureStillCurrent(...args),
     beginStageAbortController: (...args) => context.beginStageAbortController(...args),
     buildChatHistoryFingerprint,
+    buildChatStructureFingerprint,
     buildRecoveryResult: (...args) => context.buildRecoveryResult(...args),
     buildReverseJournalRecoveryPlan: (...args) =>
       context.buildReverseJournalRecoveryPlan(...args),
@@ -7879,6 +7902,20 @@ async function testHistoryGenerationReusesPersistedRecallForStableUserFloor() {
   );
   assert.equal(metadataSaveCalls, 1);
   assert.equal(recallUiRefreshCalls, 1);
+
+  runtime.isHistoryRollbackPending = () => true;
+  const blocked = await runRecallController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    deliveryMode: "immediate",
+  });
+  assert.equal(blocked.status, "skipped");
+  assert.equal(blocked.reason, "楼层回滚尚未完成");
+  assert.equal(
+    applyCalls.length,
+    1,
+    "persisted recall must not be injected across an unfinished rollback",
+  );
 }
 
 async function testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit() {
@@ -8993,7 +9030,7 @@ async function testHistoryRecoveryDoesNotMutateBeforeCheckpointPersists() {
   assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
   assert.equal(
     harness.currentGraph.historyState.lastRecoveryResult.resultCode,
-    "history.recovery.checkpoint-start-persist-failed",
+    "history.rollback.checkpoint-persist-failed",
   );
   assert.equal(harness.saveGraphToChatCallOptions[0]?.awaitDurable, true);
 }
@@ -9426,6 +9463,430 @@ async function testHistoryRecoveryFailureCarriesResultCode() {
   assert.deepEqual(harness.currentGraph.vectorIndexState.lastIntegrityIssue, {
     code: "dangling-vector",
   });
+}
+
+async function testHistoryRollbackPublishesOnlyCommittedPrefix() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "prefix-node" }, { id: "deleted-node" }],
+    edges: [],
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: { 1: "hash-1", 3: "hash-3" },
+      historyDirtyFrom: 3,
+      lastMutationSource: "message-deleted",
+      lastMutationReason: "tail deleted",
+      extractionCount: 2,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "prefix" }, { id: "deleted" }],
+    lastProcessedSeq: 3,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "deleted", processedRange: [2, 3] }],
+  });
+  harness.rollbackAffectedJournals = (graph) => {
+    graph.nodes = graph.nodes.filter((node) => node.id !== "deleted-node");
+    graph.batchJournal = graph.batchJournal.slice(0, 1);
+    graph.historyState.lastProcessedAssistantFloor = 1;
+    graph.historyState.extractionCount = 1;
+  };
+  harness.persistDetachedRecoveryGraphImpl = () => {
+    harness.chat[1].mes += "<img src='late-render.png'>";
+    return { accepted: true };
+  };
+  let replayCalls = 0;
+  let resumeCalls = 0;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    replayCalls += 1;
+    return 99;
+  };
+  harness.maybeResumePendingAutoExtraction = async () => {
+    resumeCalls += 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-deleted",
+  );
+
+  assert.equal(result, true);
+  assert.deepEqual(harness.currentGraph.nodes.map((node) => node.id), [
+    "prefix-node",
+  ]);
+  assert.equal(harness.currentGraph.historyState.lastProcessedAssistantFloor, 1);
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, null);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.rollback.applied",
+  );
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.automaticReplay,
+    false,
+  );
+  assert.equal(replayCalls, 0);
+  assert.equal(resumeCalls, 0);
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 1);
+  assert.equal(
+    harness.persistDetachedRecoveryGraphCalls[0].options.reason,
+    "history-rollback-complete",
+  );
+  assert.deepEqual(harness.currentGraph.historyState.processedMessageHashes, {
+    1: "hash-1",
+  });
+}
+
+async function testHistoryRollbackUnavailableNeverRebuildsOrReplays() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const originalGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.currentGraph = originalGraph;
+  let replayCalls = 0;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    replayCalls += 1;
+    return 1;
+  };
+  harness.findJournalRecoveryPointImpl = () => null;
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-deleted",
+  );
+
+  assert.equal(result, false);
+  assert.equal(harness.currentGraph, originalGraph);
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.rollback.unavailable",
+  );
+  assert.equal(replayCalls, 0);
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 0);
+  assert.equal(harness.toastCalls.warning.length, 0);
+}
+
+async function testLegacySnapshotRollbackMarksVectorStateForRepair() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "old-tail" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1", dirty: false },
+    batchJournal: [{ id: "legacy" }],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "legacy-snapshot",
+    affectedBatchCount: 1,
+    snapshotBefore: {
+      nodes: [{ id: "prefix-node" }],
+      edges: [],
+      historyState: {
+        lastProcessedAssistantFloor: -1,
+        extractionCount: 0,
+      },
+      vectorIndexState: {
+        collectionId: "col-1",
+        dirty: false,
+        replayRequiredNodeIds: [],
+      },
+      batchJournal: [],
+      lastProcessedSeq: -1,
+    },
+  });
+  harness.applyRecoveryPlanToVectorStateImpl = (plan, floor, graph) =>
+    applyRecoveryPlanToGraphVectorState(graph, plan, floor);
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-deleted",
+  );
+
+  assert.equal(result, true);
+  assert.equal(harness.applyRecoveryPlanCalls.length, 1);
+  assert.equal(harness.currentGraph.vectorIndexState.dirty, true);
+  assert.equal(
+    harness.currentGraph.vectorIndexState.dirtyReason,
+    "history-rollback-legacy-snapshot",
+  );
+  assert.equal(
+    harness.currentGraph.vectorIndexState.pendingRepairFromFloor,
+    1,
+  );
+  assert.deepEqual(harness.currentGraph.vectorIndexState.replayRequiredNodeIds, [
+    "prefix-node",
+  ]);
+}
+
+async function testHistoryRollbackRejectsCandidateWithoutPublishing() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const originalGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "batch-1" }],
+    lastProcessedSeq: 1,
+  };
+  harness.currentGraph = originalGraph;
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "batch-1", processedRange: [0, 1] }],
+  });
+  harness.rollbackAffectedJournals = (graph) => {
+    graph.nodes = [];
+    graph.batchJournal = [];
+    graph.historyState.lastProcessedAssistantFloor = -1;
+  };
+  harness.persistDetachedRecoveryGraphResults.push({
+    accepted: false,
+    reason: "candidate-write-failed",
+  });
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-deleted",
+  );
+
+  assert.equal(result, false);
+  assert.equal(harness.currentGraph, originalGraph);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "original-node");
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.rollback.persist-failed",
+  );
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 1);
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+}
+
+async function testHistoryRollbackAbortsStaleAcceptedCandidate() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "batch-1" }],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "batch-1", processedRange: [0, 1] }],
+  });
+  harness.rollbackAffectedJournals = (graph) => {
+    graph.nodes = [];
+    graph.batchJournal = [];
+    graph.historyState.lastProcessedAssistantFloor = -1;
+  };
+  let persistCalls = 0;
+  harness.persistDetachedRecoveryGraphImpl = () => {
+    persistCalls += 1;
+    if (persistCalls === 1) {
+      harness.chat[1].is_user = true;
+      return { accepted: true };
+    }
+    return { accepted: false, reason: "compensation-write-failed" };
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-deleted",
+  );
+
+  assert.equal(result, false);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "original-node");
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.rollback.aborted",
+  );
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+  assert.ok(
+    harness.saveGraphToChatCallOptions.some(
+      (options) =>
+        options.reason ===
+        "history-rollback-aborted:checkpoint-fallback",
+    ),
+    "a failed detached compensation must persist the live dirty checkpoint",
+  );
+}
+
+async function testConsecutiveDeletesDrainLatestRollbackBeforeReadBarrier() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "prefix" }, { id: "tail" }],
+    edges: [],
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: { 1: "hash-1", 3: "hash-3" },
+      historyDirtyFrom: 3,
+      lastMutationSource: "message-deleted",
+      extractionCount: 2,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "prefix" }, { id: "tail" }],
+    lastProcessedSeq: 3,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "tail", processedRange: [2, 3] }],
+  });
+  harness.rollbackAffectedJournals = (graph) => {
+    graph.nodes = graph.nodes.filter((node) => node.id === "prefix");
+    graph.batchJournal = graph.batchJournal.slice(0, 1);
+    graph.historyState.lastProcessedAssistantFloor = 1;
+    graph.historyState.extractionCount = 1;
+  };
+  harness.beginStageAbortController = () => {
+    const controller = new AbortController();
+    harness.activeHistoryController = controller;
+    return controller;
+  };
+  let releaseFirstCandidate;
+  let firstCandidateEntered;
+  const firstCandidateGate = new Promise((resolve) => {
+    firstCandidateEntered = resolve;
+  });
+  let detachedPersistCalls = 0;
+  harness.persistDetachedRecoveryGraphImpl = () => {
+    detachedPersistCalls += 1;
+    if (detachedPersistCalls === 1) {
+      firstCandidateEntered();
+      return new Promise((resolve) => {
+        releaseFirstCandidate = resolve;
+      });
+    }
+    return { accepted: true };
+  };
+  let resumeCalls = 0;
+  harness.maybeResumePendingAutoExtraction = async () => {
+    resumeCalls += 1;
+  };
+
+  const attempts = [];
+  let coordinator = null;
+  coordinator = createHistoryRecoveryCoordinator({
+    getCurrentChatId: () => harness.activeChatId,
+    abortActive(reason) {
+      const error = harness.createAbortError(reason);
+      harness.activeHistoryController?.abort(error);
+      return true;
+    },
+    async runAttempt({ trigger, revision }) {
+      attempts.push({ trigger, revision });
+      return await harness.result.recoverFromHistoryMutation(trigger);
+    },
+  });
+
+  coordinator.request("first-delete");
+  const mutationBarrier = coordinator.start();
+  await firstCandidateGate;
+
+  harness.chat.splice(2, 2);
+  harness.currentGraph.historyState.historyDirtyFrom = 1;
+  harness.currentGraph.historyState.lastMutationReason = "second delete";
+  coordinator.request("second-delete");
+  const recallBarrier = coordinator.waitForCurrent();
+  assert.equal(recallBarrier, mutationBarrier);
+  releaseFirstCandidate({ accepted: true });
+
+  assert.equal(await recallBarrier, true);
+  assert.deepEqual(attempts, [
+    { trigger: "first-delete", revision: 1 },
+    { trigger: "second-delete", revision: 2 },
+  ]);
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, null);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.rollback.applied",
+  );
+  assert.deepEqual(harness.currentGraph.nodes.map((node) => node.id), [
+    "prefix",
+  ]);
+  assert.equal(coordinator.getSnapshot().busy, false);
+  assert.equal(resumeCalls, 0);
+}
+
+async function testEnaPlannerRecallStopsAtRestoreLock() {
+  const { runPlannerRecallForEnaController } = await import(
+    "../runtime/planner-recall-controller.js"
+  );
+  let retrieveCalls = 0;
+  const result = await runPlannerRecallForEnaController(
+    {
+      normalizeRecallInputText: (value) => String(value || "").trim(),
+      isTrivialUserInput: (value) => ({
+        trivial: !value,
+        reason: value ? "" : "empty",
+        normalizedText: value,
+      }),
+      getSettings: () => ({ enabled: true, recallEnabled: true }),
+      isRestoreLockActive: () => true,
+      console,
+      retrieve: async () => {
+        retrieveCalls += 1;
+      },
+    },
+    { rawUserInput: "planner input" },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "restore-lock-active");
+  assert.equal(retrieveCalls, 0);
 }
 async function testRerollRejectsMissingRecoveryPoint() {
   const harness = await createRerollHarness();
@@ -10579,17 +11040,15 @@ await testRecallCardRemovePlotSwitchesToRecallTabWhenRecallExists();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();
-await testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast();
 await testHistoryRecoveryPausesWhenRenderLimitedChatSlice();
-await testHistoryRecoveryFullRebuildStillWarnsUser();
-await testHistoryRecoveryAbortRetainsRecoveryCheckpoint();
-await testHistoryRecoveryAbortsWhenSameChatChangesDuringAwait();
 await testHistoryRecoveryDoesNotMutateBeforeCheckpointPersists();
-await testHistoryRecoveryDoesNotPublishRejectedBaseCandidate();
-await testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails();
-await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
-await testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay();
-await testHistoryRecoveryFailureCarriesResultCode();
+await testHistoryRollbackPublishesOnlyCommittedPrefix();
+await testHistoryRollbackUnavailableNeverRebuildsOrReplays();
+await testLegacySnapshotRollbackMarksVectorStateForRepair();
+await testHistoryRollbackRejectsCandidateWithoutPublishing();
+await testHistoryRollbackAbortsStaleAcceptedCandidate();
+await testConsecutiveDeletesDrainLatestRollbackBeforeReadBarrier();
+await testEnaPlannerRecallStopsAtRestoreLock();
 await testRerollRejectsInvalidReverseJournalPlanFailClosed();
 await testRerollDoesNotMutateBeforeCheckpointPersists();
 await testRerollDoesNotPublishRejectedRollbackCandidate();

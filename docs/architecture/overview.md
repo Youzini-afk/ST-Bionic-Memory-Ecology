@@ -69,9 +69,9 @@ ST-BME 的运行可以归纳为三条相对独立的链路。
 横跨写入和读取，确保宿主的各种异常状态（只渲染最近 N 条、reroll、切换聊天、历史被编辑）不会误清空或覆盖记忆图谱。
 
 ```
-历史变动检测 → 必要时历史恢复（replay 或全量重建）
-渲染切片识别 → 暂停破坏性恢复
-Restore Lock → 恢复期间阻断图谱变更
+历史变动检测 → 确定性回滚受影响的已提交事务
+渲染切片识别 → 暂停破坏性回滚
+Restore Lock → 回滚期间阻断图谱变更与读取
 持久化身份校验 → 防止把别的聊天身份当成当前聊天
 ```
 
@@ -109,9 +109,9 @@ ST-BME/
 │   ├── extractor.js               # LLM 提取管线
 │   ├── extraction-controller.js   # 自动/手动提取编排
 │   ├── extraction-success-controller.js # 提取成功后处理编排（注入式）
-│   ├── reroll-recovery-controller.js # reroll 回滚 + 历史恢复编排（注入式）
+│   ├── reroll-recovery-controller.js # reroll 工作流 + 楼层事务回滚编排（注入式）
 │   ├── extraction-context.js      # 结构化消息和边界过滤
-│   ├── chat-history.js            # 楼层、hash、历史恢复工具
+│   ├── chat-history.js            # 楼层身份、可逆 journal 与回滚工具
 │   ├── consolidator.js            # 记忆整合
 │   ├── compressor.js              # 压缩与遗忘
 │   ├── hierarchical-summary.js    # 小总结和折叠总结

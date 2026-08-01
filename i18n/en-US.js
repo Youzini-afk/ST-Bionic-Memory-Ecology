@@ -447,12 +447,12 @@ export default {
   "recall.planner.state": "Task State",
 
   "stage.extraction": "Extraction",
-  "stage.history": "History Recovery",
+  "stage.history": "Floor Rollback",
   "stage.recall": "Recall",
   "stage.vector": "Vector",
   "stageNotice.title.extraction": "ST-BME Extraction",
   "stageNotice.title.generic": "ST-BME",
-  "stageNotice.title.history": "ST-BME History Recovery",
+  "stageNotice.title.history": "ST-BME Floor Rollback",
   "stageNotice.title.recall": "ST-BME Recall",
   "stageNotice.title.vector": "ST-BME Vector",
 

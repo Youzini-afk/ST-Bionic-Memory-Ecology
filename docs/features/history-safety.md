@@ -1,4 +1,4 @@
-# 历史安全：恢复、渲染保护、Restore Lock
+# 历史安全：事务回滚、渲染保护、Restore Lock
 
 ST-BME 的记忆图谱依赖"楼层 → 已提取"的映射。但宿主聊天历史会被各种操作扰动：编辑、删除、swipe、reroll、只渲染最近 N 条、切换聊天。本文档说明保护机制，确保这些扰动不会误清空或错误覆盖记忆。
 
@@ -10,22 +10,24 @@ ST-BME 的记忆图谱依赖"楼层 → 已提取"的映射。但宿主聊天历
 
 因此，持久化失败或进入 pending 时，当前会话中的节点、processed floor/hash、journal 和计数都保持在上一个已确认版本。待提交快照按聊天身份保存在恢复材料中；重试只使用该聊天的快照，切换到别的聊天后不会借用新聊天的运行图谱，也不会把晚到结果发布过去。
 
-## 历史变动恢复
+## 历史变动回滚
 
 已处理前缀为每个消息记录提取相关投影：user/system/assistant 角色、正文、说话者与当前 swipe。BME 自己管理的隐藏标记不会把同一条 assistant 误判成 system；真实角色、正文、说话者或 swipe 改变则会标脏。
 
-宿主的删除、编辑和 swipe 事件到达时，聊天数组已经变化。编辑/swipe 的消息 id 和明确的删除序号元数据可直接定位；`MESSAGE_DELETED` 的普通 payload 只是删除后的新 `chat.length`，不能冒充中段删除起点，此时必须由逐消息 hash 找到第一处差异。事件路径会立即写入 durable dirty checkpoint，再等待宿主状态稳定后执行恢复；旧 hash 版本恰逢事件时不会把已经变化的聊天登记成新基线，而是从完整前缀保守恢复。
+宿主的删除、编辑和 swipe 事件到达时，聊天数组已经变化。编辑/swipe 的消息 id 和明确的删除序号元数据可直接定位；`MESSAGE_DELETED` 的普通 payload 只是删除后的新 `chat.length`，不能冒充中段删除起点，此时必须由逐消息身份记录找到第一处结构差异。事件路径会立即写入 durable dirty checkpoint，再等待宿主状态稳定后执行回滚；纯展示文本、图片和其他插件的后写入不自动触发重提取。
 
-恢复顺序为：
+删除/结构变动事务只做回滚：
 
 ```
 检测历史变动
   → 优先反向应用受影响 batch journal
-  → 从稳定聊天快照重放受影响后缀
-  → journal 不足或恢复失败则从完整聊天全量重建
+  → journal 为旧格式时使用对应的 snapshotBefore
+  → 持久化并一次性发布回滚后的稳定图谱
 ```
 
-全量重建优先正确性，但较慢（消耗 LLM 调用）。`recoverHistoryIfNeeded` 是这条路径的核心编排（被抽到 `maintenance/reroll-recovery-controller.js`，是过去最难、最 bug 多的函数之一）。
+这条路径不调用 LLM、不重放后缀、不清理整个向量库，也不会在结束后自动唤醒提取。journal 覆盖不足时保留 dirty checkpoint 并停止，绝不因一次删楼自动全量重建。后续主动提取是另一笔独立事务。
+
+连续楼层变动由单飞协调器合并：新变动提升目标 revision 并终止旧代，旧代完成补偿后必须继续处理最新 revision；召回只可等待同一条事务屏障，不能从未提交的图谱继续执行。
 
 ## 渲染切片保护
 
@@ -37,13 +39,13 @@ SillyTavern 可能只在 DOM 里渲染最近 N 条消息（性能优化）。如
 
 ## Restore Lock
 
-恢复过程是异步的。如果恢复进行到一半，用户切了聊天或触发了图谱变更，就可能写坏数据。
+回滚持久化是异步的。如果进行到一半，用户切了聊天或再次触发楼层变更，就可能写坏数据。
 
-> Restore Lock 在历史恢复期间阻断图谱变更操作。变更门禁（`ensureGraphMutationReady` / `getGraphMutationBlockReason`）会返回"已暂停：正在恢复"类的原因，而不是让变更穿透。
+> Restore Lock 在楼层回滚期间阻断图谱变更操作。变更门禁（`ensureGraphMutationReady` / `getGraphMutationBlockReason`）会返回暂停原因，而不是让变更穿透。
 
-恢复开始时会冻结聊天快照与内容 fingerprint。每个异步向量、重放和持久化边界都同时校验聊天身份与 fingerprint：切到别的聊天，或仍在同一聊天但内容再次变化，都会 abort，恢复开始前的图谱并保留最早 dirty checkpoint，而不是发布基于移动历史的结果。
+回滚开始时会冻结聊天快照与结构 fingerprint（消息 UID、swipe UID、角色和位置，不含正文及插件附件）。持久化前后都同时校验聊天身份、结构 fingerprint 和 AbortSignal：切到别的聊天，或仍在同一聊天但结构再次变化，都会 abort，补偿回滚开始前的图谱并保留最早 dirty checkpoint；图片/展示文本后写入不会反复重启回滚。Restore Lock 使用所有者 token；旧聊天晚到的 `finally` 不能释放新聊天的锁。
 
-普通 swipe 会立即回滚旧 assistant 的图谱效果并重提。overswipe 产生的空 assistant 只是宿主等待新回复的占位：它先持久化 `awaiting-replacement` dirty checkpoint，不对空文本提取；新回复到达后再走同一套 journal 回滚与重放。父 user 楼层的 `bme_recall` 在该过程中保留，reroll 不重新运行 ENA。
+普通删除只回滚旧楼层的图谱效果。reroll/swipe 是单独的显式工作流：先提交回滚，再由新回复走其本来的提取流程。overswipe 的空 assistant 只持久化 `awaiting-replacement` checkpoint，不对空文本提取。父 user 楼层的 `bme_recall` 在该过程中保留，reroll 不重新运行 ENA。
 
 ## 与控制平面的关系
 
@@ -57,4 +59,4 @@ SillyTavern 可能只在 DOM 里渲染最近 N 条消息（性能优化）。如
 
 ## 手动提取时的提示
 
-手动触发提取时若恰逢历史恢复未完成，会提示"历史恢复暂停"——这是 Restore Lock 在起作用，等恢复完成即可。过去这里出现过"陈旧 pending 卡住"的 bug，已由持久化 reducer 的自动清除不变量修复。
+手动触发提取时若恰逢楼层回滚未完成，会被 Restore Lock 暂停；回滚完成后再作为独立事务执行。召回同样遵守稳定读屏障，不会为了召回另起一轮回滚，也不会越过失败/待持久化的回滚状态。

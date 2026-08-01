@@ -9,6 +9,7 @@ export const UI_I18N_GLOSSARY = Object.freeze({
   "注入": "Injection",
   "注入预览": "Injection Preview",
   "历史恢复": "History Recovery",
+  "楼层回滚": "Floor Rollback",
   "图谱持久化": "Graph Persistence",
   "检查点": "Checkpoint",
   "副本同步": "Replica Sync",
