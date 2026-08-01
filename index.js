@@ -352,6 +352,12 @@ import {
   normalizeMemoryRuntimeMode,
 } from "./runtime/memory-runtime-mode.js";
 import {
+  mergeAgentExtractionWorkerRequest,
+  resolveAgentExtractionTargetEndFloor,
+  runManualExtractionByMode,
+  shouldContinueAgentExtractionDrain,
+} from "./runtime/manual-extraction-route.js";
+import {
   createBackgroundMaintenanceQueue,
   resolveConcurrencyConfig,
 } from "./runtime/concurrency.js";
@@ -15716,6 +15722,7 @@ async function markGraphStewardBatchWithoutChanges({
 async function runGraphStewardBatch({
   lockedEndFloor = null,
   triggerSource = "message-received",
+  manual = false, skipHistoryRecovery = false,
   signal,
 } = {}) {
   const preflightLease = conversationWorkspace.captureLease();
@@ -15760,7 +15767,7 @@ async function runGraphStewardBatch({
       };
     }
   }
-  if (!(await recoverHistoryIfNeeded("graph-steward-preflight"))) {
+  if (!skipHistoryRecovery && !(await recoverHistoryIfNeeded("graph-steward-preflight"))) {
     deferAutoExtraction("graph-steward-history-recovery", {
       chatId: preflightChatId,
       targetEndFloor: lockedEndFloor,
@@ -15788,6 +15795,7 @@ async function runGraphStewardBatch({
   const scheduleSettings = {
     ...settings,
     extractEvery: 1,
+    extractAutoEnabled: manual ? true : settings.extractAutoEnabled,
     extractAutoDelayLatestAssistant: false,
     enableSmartTrigger: false,
   };
@@ -15846,6 +15854,9 @@ async function runGraphStewardBatch({
     settings,
     signal,
     observer: agentRunMonitor,
+    instructions: manual
+      ? "这是用户显式发起的提取任务。读取上下文后必须使用 memory_run_pipeline 结算，不得以无变化跳过；请在用户已启用的能力中选择本批实际需要的工作。"
+      : "",
     runPipeline: async ({ capabilities = {}, reason = "", runId = "", signal: toolSignal }) => {
       if (toolSignal?.aborted) {
         throw toolSignal.reason || createAbortError("graph-steward-aborted");
@@ -15854,6 +15865,7 @@ async function runGraphStewardBatch({
       const result = await runWorkflowExtraction({
         lockedEndFloor: plan.endIdx,
         triggerSource: `agent:${triggerSource}`,
+        skipHistoryRecovery,
         signal: toolSignal,
         presentation: createAgentBackgroundPresentation({ runId, observer: agentRunMonitor }),
         settingsOverride: {
@@ -15897,38 +15909,40 @@ async function runGraphStewardBatch({
 function runAgentExtraction(options = {}) {
   const chatId = String(getCurrentChatId() || "").trim();
   if (!chatId) return Promise.resolve({ success: false, reason: "missing-chat-id" });
-  const requestedEndFloor = Number.isFinite(Number(options.lockedEndFloor))
-    ? Math.floor(Number(options.lockedEndFloor))
-    : null;
+  const requestedEndFloor = resolveAgentExtractionTargetEndFloor({
+    lockedEndFloor: options.lockedEndFloor, drainAll: options.drainAll,
+    assistantTurns: getAssistantTurns(getContext()?.chat || []),
+  });
   const existing = graphStewardWorkers.get(chatId);
   if (existing) {
-    if (
-      requestedEndFloor != null &&
-      (existing.targetEndFloor == null || requestedEndFloor > existing.targetEndFloor)
-    ) {
-      existing.targetEndFloor = requestedEndFloor;
-      existing.rerun = true;
-    }
+    mergeAgentExtractionWorkerRequest(existing, options, requestedEndFloor);
     return existing.promise;
   }
   const worker = {
     controller: new AbortController(),
     targetEndFloor: requestedEndFloor,
     rerun: false,
+    drainAll: false, manual: false, skipHistoryRecovery: false,
+    triggerSource: "message-received",
     promise: null,
   };
+  mergeAgentExtractionWorkerRequest(worker, options, requestedEndFloor);
   worker.promise = (async () => {
     const results = [];
     while (!worker.controller.signal.aborted) {
       worker.rerun = false;
       try {
-        results.push(
-          await runGraphStewardBatch({
-            ...options,
-            lockedEndFloor: worker.targetEndFloor,
-            signal: worker.controller.signal,
-          }),
-        );
+        const beforeFloor = getLastProcessedAssistantFloor();
+        const result = await runGraphStewardBatch({
+          ...options,
+          lockedEndFloor: worker.targetEndFloor,
+          manual: worker.manual,
+          skipHistoryRecovery: worker.skipHistoryRecovery,
+          triggerSource: worker.triggerSource,
+          signal: worker.controller.signal,
+        });
+        results.push(result);
+        worker.rerun ||= shouldContinueAgentExtractionDrain({ drainAll: worker.drainAll, result, beforeFloor, afterFloor: getLastProcessedAssistantFloor(), targetEndFloor: worker.targetEndFloor });
       } catch (error) {
         const historyChanged =
           String(error?.message || "") === "graph-steward-history-changed";
@@ -17336,7 +17350,7 @@ async function onFetchEmbeddingModels(mode = null) {
   );
 }
 
-async function onManualExtract(options = {}) {
+async function onWorkflowManualExtract(options = {}) {
   return await onManualExtractController(
     {
       beginStageAbortController,
@@ -17370,6 +17384,14 @@ async function onManualExtract(options = {}) {
     },
     options,
   );
+}
+
+async function onManualExtract(options = {}) {
+  return await runManualExtractionByMode({
+    mode: getSettings()?.memoryRuntimeMode, options,
+    runAgent: runAgentExtraction,
+    runWorkflow: onWorkflowManualExtract,
+  });
 }
 
 async function onExtractionTask(options = {}) {

@@ -1857,7 +1857,7 @@ export async function runExtractionController(runtime, options = {}) {
     runtime.ensureCurrentGraphRuntimeState?.();
   }
 
-  if (!(await runtime.recoverHistoryIfNeeded("auto-extract"))) {
+  if (options?.skipHistoryRecovery !== true && !(await runtime.recoverHistoryIfNeeded("auto-extract"))) {
     runtime.console?.debug?.("[ST-BME] auto extraction paused during history recovery", {
       recovering: runtime.getIsRecoveringHistory?.() === true,
     });
@@ -2297,6 +2297,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
       ...options,
       taskLabel: "提取未处理",
       toastTitle: "ST-BME 重新提取",
+      triggerSource: "manual-pending",
     });
   }
 
@@ -2437,6 +2438,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
     suppressIntermediateAutoConsolidation: true,
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
+    triggerSource: "manual-rerun",
     showStartToast: false,
   });
   let finalization = {
@@ -2741,6 +2743,7 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     drainAll: false,
     showStartToast: false,
     skipHistoryRecovery: true,
+    triggerSource: "reroll",
   });
   const finalization =
     rollbackResult?.checkpointRetained === true

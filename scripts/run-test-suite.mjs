@@ -28,6 +28,7 @@ const PRODUCT_CONTRACT_TESTS = [
   "indexeddb-sync.mjs",
   "llm-streaming.mjs",
   "luker-host-adapter.mjs",
+  "manual-agent-extraction-route.mjs",
   "memory-branch.mjs",
   "memory-changeset.mjs",
   "memory-graph-projection.mjs",
