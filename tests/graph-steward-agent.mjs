@@ -93,6 +93,7 @@ const result = await runGraphStewardAgent({
 
 assert.equal(result.outcome.kind, "pipeline");
 assert.equal(pipelineCalls.length, 1);
+assert.equal(pipelineCalls[0].runId, result.runId);
 assert.equal(agentPromptCalls[0].taskType, "agent_steward");
 assert.ok(agentPromptCalls[0].toolNames.includes("memory_task_context"));
 assert.ok(agentPromptCalls[0].toolNames.includes("memory_run_pipeline"));
@@ -143,6 +144,7 @@ assert.equal(noChange.outcome.kind, "no_change");
 assert.equal(noChangeCall, 1);
 
 let fallbackCalls = 0;
+let fallbackRunId = "";
 const fallback = await runGraphStewardAgent({
   ...base,
   allowedCapabilities: {
@@ -152,8 +154,9 @@ const fallback = await runGraphStewardAgent({
     compress: true,
     forget: false,
   },
-  runPipeline: async ({ fallback: isFallback, capabilities }) => {
+  runPipeline: async ({ fallback: isFallback, capabilities, runId }) => {
     fallbackCalls += 1;
+    fallbackRunId = runId;
     assert.equal(isFallback, true);
     assert.equal(capabilities.enableConsolidation, true);
     assert.equal(capabilities.enableAutoCompression, true);
@@ -166,6 +169,7 @@ const fallback = await runGraphStewardAgent({
 });
 assert.equal(fallback.outcome.kind, "pipeline_fallback");
 assert.equal(fallbackCalls, 1);
+assert.equal(fallbackRunId, fallback.runId);
 
 let failedPipelineCalls = 0;
 const failedPipeline = await runGraphStewardAgent({

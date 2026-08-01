@@ -107,6 +107,7 @@ function createRun(event = {}, now = Date.now()) {
     usage: {},
     metadata: {},
     activeTool: null,
+    substage: null,
     outcome: null,
     stream: null,
     events: [],
@@ -268,6 +269,7 @@ export class AgentRunMonitor {
         Number(payload.toolCallNumber || 0),
       );
       run.activeTool = null;
+      run.substage = null;
     }
 
     const terminalStatus = TERMINAL_STATUS_BY_EVENT[event?.eventType];
@@ -287,6 +289,7 @@ export class AgentRunMonitor {
       );
       if (run.stream) run.stream.active = false;
       run.activeTool = null;
+      run.substage = null;
     }
 
     this.#touch(runId, "event");
@@ -338,6 +341,22 @@ export class AgentRunMonitor {
     run.outcome = clone(outcome, null);
     run.updatedAt = this.now();
     this.#touch(normalizedRunId, "outcome");
+    return runReceipt(run, this.controls.has(normalizedRunId));
+  }
+
+  recordStageStatus({ runId, stage = "", text = "", meta = "", level = "info" } = {}) {
+    const normalizedRunId = String(runId || "").trim();
+    const run = this.runs.get(normalizedRunId);
+    if (!run || run.terminal) return null;
+    run.substage = {
+      stage: String(stage || ""),
+      text: String(text || ""),
+      meta: String(meta || ""),
+      level: String(level || "info"),
+      updatedAt: this.now(),
+    };
+    run.updatedAt = run.substage.updatedAt;
+    this.#touch(normalizedRunId, "stage");
     return runReceipt(run, this.controls.has(normalizedRunId));
   }
 

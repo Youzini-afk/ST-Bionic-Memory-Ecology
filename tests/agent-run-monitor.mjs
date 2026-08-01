@@ -149,10 +149,22 @@ async function testCancellationByRunId() {
   await modelEntered;
   const before = monitor.getSnapshot({ chatId: "chat:monitor-cancel" }).runs[0];
   assert.equal(before.cancellable, true);
+  monitor.recordStageStatus({
+    runId: "run-monitor-cancel",
+    stage: "extraction",
+    text: "Extracting",
+    meta: "floor 8",
+    level: "running",
+  });
+  assert.equal(
+    monitor.getSnapshot({ chatId: "chat:monitor-cancel" }).runs[0].substage.text,
+    "Extracting",
+  );
   assert.equal(monitor.cancel("run-monitor-cancel", "Stop this run").ok, true);
   await assert.rejects(runPromise, BmeAgentCancelledError);
   const after = monitor.getSnapshot({ chatId: "chat:monitor-cancel" }).runs[0];
   assert.equal(after.status, "cancelled");
+  assert.equal(after.substage, null);
   assert.equal(after.cancellable, false);
   assert.equal(monitor.cancel("run-monitor-cancel").ok, false);
 }

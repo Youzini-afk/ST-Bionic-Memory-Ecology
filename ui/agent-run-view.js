@@ -394,6 +394,23 @@ export function buildAgentRunTimeline(run = {}) {
     });
   }
 
+  if (run?.substage && !run.terminal) {
+    const activeToolNumber = Number(run?.activeTool?.toolCallNumber || 0);
+    const activeTool = entries.find(
+      (entry) =>
+        entry.kind === "tool" &&
+        entry.status === "running" &&
+        (!activeToolNumber || entry.toolCallNumber === activeToolNumber),
+    );
+    if (activeTool) {
+      activeTool.description = [run.substage.text, run.substage.meta]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .join(" · ") || activeTool.description;
+      activeTool.substageLevel = String(run.substage.level || "info");
+    }
+  }
+
   return groupConsecutiveTools(entries);
 }
 

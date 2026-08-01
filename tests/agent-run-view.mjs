@@ -102,6 +102,32 @@ function event(id, eventType, payload = {}) {
 
 {
   const timeline = buildAgentRunTimeline({
+    runId: "run-pipeline-stage",
+    activeTool: { toolCallNumber: 1 },
+    substage: {
+      text: "Extracting memories",
+      meta: "floors 8–10",
+      level: "running",
+    },
+    events: [
+      event("start-stage", "run_started"),
+      event("tool-stage", "tool_started", {
+        toolCallNumber: 1,
+        toolCall: {
+          id: "pipeline-call",
+          function: { name: "memory_run_pipeline", arguments: "{}" },
+        },
+      }),
+    ],
+  });
+  const tool = timeline.find((entry) => entry.kind === "tool");
+  assert.match(tool.description, /Extracting memories/);
+  assert.match(tool.description, /floors 8–10/);
+  assert.equal(tool.substageLevel, "running");
+}
+
+{
+  const timeline = buildAgentRunTimeline({
     runId: "run-fallback",
     status: "failed",
     outcome: { completed: true, fallback: true },

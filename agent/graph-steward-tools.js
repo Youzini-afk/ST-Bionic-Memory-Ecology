@@ -168,6 +168,7 @@ export class GraphStewardAgentToolset {
       const result = await this.runPipeline({
         capabilities,
         reason,
+        runId: String(scope?.runId || ""),
         signal: scope?.signal,
       });
       const success = result?.success === true;

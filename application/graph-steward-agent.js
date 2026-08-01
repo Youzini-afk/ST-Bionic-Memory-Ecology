@@ -130,6 +130,7 @@ export async function runGraphStewardAgent({
           enableSleepCycle: allowedCapabilities.forget === true,
         },
         reason: runError?.message || "Agent 未提交任务决策，已运行完整工作流兜底",
+        runId,
         signal,
         fallback: true,
       });

@@ -198,6 +198,7 @@ import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=reca
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
 import { createAgentRunMonitor } from "./runtime/agent-run-monitor.js";
+import { createAgentBackgroundPresentation, createMemoryTaskPresentationBindings } from "./runtime/task-presentation.js";
 import { runGraphStewardAgent } from "./application/graph-steward-agent.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
@@ -13202,10 +13203,11 @@ function setLastExtractionStatus(
     syncRuntime = true,
     toastKind = "",
     toastTitle = "ST-BME 提取",
-    noticeMarquee = false,
+    noticeMarquee = false, presentationMode = "foreground",
   } = {},
 ) {
   conversationWorkspace.lastExtractionStatus = createUiStatus(text, meta, level);
+  if (presentationMode === "agent-background") return refreshPanelLiveState();
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13229,9 +13231,10 @@ function setLastVectorStatus(
   text,
   meta,
   level = "info",
-  { syncRuntime = false, toastKind = "", toastTitle = "ST-BME 向量" } = {},
+  { syncRuntime = false, toastKind = "", toastTitle = "ST-BME 向量", presentationMode = "foreground" } = {},
 ) {
   conversationWorkspace.lastVectorStatus = createUiStatus(text, meta, level);
+  if (presentationMode === "agent-background") return refreshPanelLiveState();
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13258,10 +13261,11 @@ function setLastRecallStatus(
     syncRuntime = true,
     toastKind = "",
     toastTitle = "ST-BME 召回",
-    noticeMarquee = false,
+    noticeMarquee = false, presentationMode = "foreground",
   } = {},
 ) {
   conversationWorkspace.lastRecallStatus = createUiStatus(text, meta, level);
+  if (presentationMode === "agent-background") return refreshPanelLiveState();
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13290,7 +13294,11 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
   lastExtractionWarningAt = now;
   toastr.warning(message, title, { timeOut: 4500 });
 }
-
+function getMemoryTaskPresentationBindings(presentation = null) {
+  return createMemoryTaskPresentationBindings({
+    presentation, setLastExtractionStatus, setLastVectorStatus, setLastRecallStatus, notifyExtractionIssue, toastr,
+  });
+}
 async function fetchLocalWithTimeout(
   url,
   options = {},
@@ -13764,6 +13772,8 @@ async function syncVectorState(options = {}) {
     options?.graph && typeof options.graph === "object" ? options.graph : null;
   const controllerOptions = { ...(options || {}) };
   delete controllerOptions.graph;
+  delete controllerOptions.presentation;
+  const presented = getMemoryTaskPresentationBindings(options.presentation);
   return await syncVectorStateController(
     {
       ensureCurrentGraphRuntimeState: targetGraph
@@ -13773,7 +13783,7 @@ async function syncVectorState(options = {}) {
           )
         : ensureCurrentGraphRuntimeState,
       getCurrentGraph: () => targetGraph || conversationWorkspace.graph,
-      setLastVectorStatus,
+      setLastVectorStatus: presented.setLastVectorStatus,
       getEmbeddingConfig,
       validateVectorConfig,
       getVectorIndexStats,
@@ -13792,9 +13802,10 @@ async function syncVectorState(options = {}) {
   );
 }
 
-function scheduleBackgroundVectorSync(task = null, settings = {}) {
+function scheduleBackgroundVectorSync(task = null, settings = {}, { presentation = null } = {}) {
   const normalizedTask =
     task && typeof task === "object" && !Array.isArray(task) ? task : {};
+  const presented = getMemoryTaskPresentationBindings(presentation);
   const config = getEmbeddingConfig();
   const chatId = normalizeChatIdCandidate(
     normalizedTask.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
@@ -13861,7 +13872,7 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
         const silentConsolidationSync =
           scheduledTask.reason === "background-vector-sync-after-consolidation";
         if (!silentConsolidationSync) {
-          setLastVectorStatus(
+          presented.setLastVectorStatus(
             "后台向量同步中",
             `${scheduledTask.mode} 模式 · 正在同步提取后的向量索引`,
             "running",
@@ -13872,6 +13883,7 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
           range: scheduledTask.range,
           expectedChatId: scheduledTask.chatId,
           silentStatus: silentConsolidationSync,
+          presentation,
         });
         if (
           result?.stale ||
@@ -13907,7 +13919,8 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
   }
   return queuedResult;
 }
-function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
+function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}, { presentation = null } = {}) {
+  const presented = getMemoryTaskPresentationBindings(presentation);
   return scheduleBackgroundMaintenancePostProcessController(
     {
       analyzeAutoConsolidationGate,
@@ -13929,8 +13942,8 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
       normalizeChatId: normalizeChatIdCandidate,
       recordMaintenanceAction,
       saveGraphToChat,
-      scheduleBackgroundVectorSync,
-      setLastExtractionStatus,
+      scheduleBackgroundVectorSync: (task, taskSettings) => scheduleBackgroundVectorSync(task, taskSettings, { presentation }),
+      setLastExtractionStatus: presented.setLastExtractionStatus,
       setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
       updateBackgroundMaintenanceQueueState,
     },
@@ -13941,7 +13954,7 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
 
 async function ensureVectorReadyIfNeeded(
   reason = "vector-ready-check",
-  signal = undefined,
+  signal = undefined, presentation = null,
 ) {
   if (!conversationWorkspace.graph) return;
   const activeChatId = String(getCurrentChatId() || "").trim();
@@ -14033,7 +14046,7 @@ async function ensureVectorReadyIfNeeded(
   const result = await syncVectorState({
     force: true,
     purge: isBackendVectorConfig(config),
-    signal,
+    signal, presentation,
   });
 
   if (result?.aborted) return result;
@@ -14818,6 +14831,7 @@ async function handleExtractionSuccess(
   );
   const taskLease = taskContext?.conversationLease || null;
   const taskHostContext = getContext();
+  const presented = getMemoryTaskPresentationBindings(taskContext?.presentation);
   const isTaskContextActive = () =>
     conversationWorkspace.graph === taskBaseGraph &&
     (taskLease
@@ -14832,6 +14846,7 @@ async function handleExtractionSuccess(
           ...options,
           graph: taskGraph,
           expectedChatId: taskChatId,
+          presentation: taskContext?.presentation,
         })
       : Promise.resolve({
           aborted: true,
@@ -14864,9 +14879,9 @@ async function handleExtractionSuccess(
       runReflectionPostProcessPlanCommit,
       setBatchStageOutcome,
       setLastExtractionStatus: (...args) =>
-        isTaskContextActive() ? setLastExtractionStatus(...args) : null,
+        isTaskContextActive() ? presented.setLastExtractionStatus(...args) : null,
       setLastVectorStatus: (...args) =>
-        isTaskContextActive() ? setLastVectorStatus(...args) : null,
+        isTaskContextActive() ? presented.setLastVectorStatus(...args) : null,
       shouldDeferExtractionMaintenance,
       shouldDeferExtractionVectorSync,
       sleepCycle,
@@ -15229,7 +15244,9 @@ async function executeExtractionBatch({
   smartTriggerDecision = null,
   signal = undefined,
   postProcessContext = null,
+  presentation = null,
 } = {}) {
+  const presented = getMemoryTaskPresentationBindings(presentation);
   return await executeExtractionBatchController(
     {
       appendBatchJournal,
@@ -15261,7 +15278,7 @@ async function executeExtractionBatch({
       getSettings,
       getSchema,
       getVectorIndexStats,
-      handleExtractionSuccess,
+      handleExtractionSuccess: (...args) => handleExtractionSuccess(...args.slice(0, 6), { ...(args[6] || {}), presentation }),
       isAbortError,
       isConversationLeaseCurrent: (...args) =>
         conversationWorkspace.isLeaseCurrent(...args),
@@ -15269,15 +15286,15 @@ async function executeExtractionBatch({
       markHistoryDirty,
       persistExtractionBatchResult,
       resolveCurrentChatStateTarget,
-      scheduleBackgroundMaintenancePostProcess,
-      scheduleBackgroundVectorSync,
+      scheduleBackgroundMaintenancePostProcess: (tasks, taskSettings) => scheduleBackgroundMaintenancePostProcess(tasks, taskSettings, { presentation }),
+      scheduleBackgroundVectorSync: (task, taskSettings) => scheduleBackgroundVectorSync(task, taskSettings, { presentation }),
       saveGraphToChat,
       setBatchStageOutcome,
       setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
       setExtractionCount: (value) => { conversationWorkspace.extractionCount = value; },
-      setLastExtractionStatus,
+      setLastExtractionStatus: presented.setLastExtractionStatus,
       stampGraphPersistenceMeta,
-      syncVectorState,
+      syncVectorState: (request) => syncVectorState({ ...request, presentation }),
       shouldAdvanceProcessedHistory,
       throwIfAborted,
       updateLastExtractedItems,
@@ -15570,6 +15587,7 @@ async function runWorkflowExtraction() {
     !Array.isArray(arguments[0])
       ? arguments[0]
       : {};
+  const presented = getMemoryTaskPresentationBindings(options.presentation);
   return await runExtractionController({
     beginStageAbortController,
     clampInt,
@@ -15577,7 +15595,7 @@ async function runWorkflowExtraction() {
     deferAutoExtraction,
     ensureCurrentGraphRuntimeState,
     ensureGraphMutationReady,
-    executeExtractionBatch,
+    executeExtractionBatch: (request) => executeExtractionBatch({ ...request, presentation: options.presentation }),
     finishStageAbortController,
     getAssistantTurns,
     getContext,
@@ -15590,14 +15608,14 @@ async function runWorkflowExtraction() {
     getSettings,
     getSmartTriggerDecision,
     isAbortError,
-    notifyExtractionIssue,
+    notifyExtractionIssue: presented.notifyExtractionIssue,
     recoverHistoryIfNeeded,
     resolveAutoExtractionPlan: resolveMemoryRuntimeAutoExtractionPlan,
     retryPendingGraphPersist,
     setIsExtracting: (value) => {
       conversationWorkspace.isExtracting = value;
     },
-    setLastExtractionStatus,
+    setLastExtractionStatus: presented.setLastExtractionStatus,
   }, options);
 }
 
@@ -15874,7 +15892,7 @@ async function runGraphStewardBatch({
     settings,
     signal,
     observer: agentRunMonitor,
-    runPipeline: async ({ capabilities = {}, reason = "", signal: toolSignal }) => {
+    runPipeline: async ({ capabilities = {}, reason = "", runId = "", signal: toolSignal }) => {
       if (toolSignal?.aborted) {
         throw toolSignal.reason || createAbortError("graph-steward-aborted");
       }
@@ -15883,6 +15901,7 @@ async function runGraphStewardBatch({
         lockedEndFloor: plan.endIdx,
         triggerSource: `agent:${triggerSource}`,
         signal: toolSignal,
+        presentation: createAgentBackgroundPresentation({ runId, observer: agentRunMonitor }),
         settingsOverride: {
           ...scheduleSettings,
           enableConsolidation: capabilities.enableConsolidation === true,
@@ -15916,6 +15935,7 @@ async function runGraphStewardBatch({
       targetEndFloor: plan.endIdx,
       strategy: "agent",
     });
+    notifyStatusToast("agent-steward-failed", "error", stewardResult?.outcome?.reason || "Agent memory task failed", "ST-BME Agent");
   }
   return stewardResult;
 }
@@ -16003,7 +16023,8 @@ async function runExtraction(options = {}) {
     : await runWorkflowExtraction(options);
 }
 
-function applyRecallInjection(settings, recallInput, recentMessages, result) {
+function applyRecallInjection(settings, recallInput, recentMessages, result, presentation = null) {
+  const presented = getMemoryTaskPresentationBindings(presentation);
   if (result?.meta?.retrieval?.agent?.mode === "graph-backed") {
     reinforceAccessBatch(
       (result?.selectedNodeIds || [])
@@ -16022,7 +16043,7 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       console,
       estimateTokens,
       formatInjection,
-      getLastRecallFallbackNoticeAt: () => lastRecallFallbackNoticeAt,
+      getLastRecallFallbackNoticeAt: () => presentation ? Date.now() : lastRecallFallbackNoticeAt,
       getRecallHookLabel,
       getSchema,
       recordInjectionSnapshot,
@@ -16033,11 +16054,9 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       setLastInjectionContent: (value) => {
         conversationWorkspace.lastInjectionContent = value;
       },
-      setLastRecallFallbackNoticeAt: (value) => {
-        lastRecallFallbackNoticeAt = value;
-      },
-      setLastRecallStatus,
-      toastr,
+      setLastRecallFallbackNoticeAt: (value) => { if (!presentation) lastRecallFallbackNoticeAt = value; },
+      setLastRecallStatus: presented.setLastRecallStatus,
+      toastr: presented.toastr,
       updateLastRecalledItems,
     },
   );
@@ -16227,10 +16246,13 @@ async function runRecall(options = {}) {
       ),
     });
   }
-  return await runRecallController(
+  const presentation = isAgentMemoryRuntimeMode(getSettings()?.memoryRuntimeMode)
+    ? createAgentBackgroundPresentation({ observer: agentRunMonitor }) : null;
+  const presented = getMemoryTaskPresentationBindings(presentation);
+  const result = await runRecallController(
     {
       abortRecallStageWithReason,
-      applyRecallInjection,
+      applyRecallInjection: (...args) => applyRecallInjection(...args, presentation),
       beginStageAbortController,
       bumpPersistedRecallGenerationCount,
       buildRecallRetrieveOptions,
@@ -16241,7 +16263,7 @@ async function runRecall(options = {}) {
       createAbortError,
       createRecallInputRecord,
       createRecallRunResult,
-      ensureVectorReadyIfNeeded,
+      ensureVectorReadyIfNeeded: (reason, signal) => ensureVectorReadyIfNeeded(reason, signal, presentation),
       finishStageAbortController,
       getActiveRecallPromise: () => conversationWorkspace.activeRecallPromise,
       getContext,
@@ -16272,16 +16294,20 @@ async function runRecall(options = {}) {
       setIsRecalling: (value) => {
         conversationWorkspace.isRecalling = value;
       },
-      setLastRecallStatus,
+      setLastRecallStatus: presented.setLastRecallStatus,
       setPendingRecallSendIntent: (value) => {
         writeConversationInput("pendingRecallSendIntent", value);
       },
-      toastr,
+      toastr: presented.toastr,
       triggerChatMetadataSave,
       waitForActiveRecallToSettle,
     },
     options,
   );
+  if (presentation && result?.status === "failed") {
+    notifyStatusToast("agent-recall-failed", "error", result.reason || "Agent recall failed", "ST-BME Agent");
+  }
+  return result;
 }
 
 // ==================== 事件钩子 ====================
