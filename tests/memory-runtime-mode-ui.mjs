@@ -12,8 +12,11 @@ assert.match(html, /id="bme-memory-runtime-mode"/);
 assert.match(html, /data-memory-runtime-mode="workflow"/);
 assert.match(html, /data-memory-runtime-mode="agent"/);
 assert.match(html, /class="bme-agent-cadence-note"/);
+assert.match(html, /id="bme-task-agent"/);
+assert.match(html, /data-task-section="agent"/);
 assert.match(panel, /bindRuntimeModeControls/);
 assert.match(panel, /refreshRuntimeModeControls/);
+assert.match(panel, /createAgentRunViewController/);
 assert.match(
   panel,
   /getTaskTypeOptionsForRuntimeMode\(\s*settings\.memoryRuntimeMode,?\s*\)/,
@@ -28,6 +31,10 @@ assert.match(css, /\.bme-runtime-mode-switch/);
 assert.match(
   css,
   /\[data-memory-runtime-mode="agent"\]\s+\.bme-agent-cadence-note/,
+);
+assert.match(
+  css,
+  /\[data-memory-runtime-mode="agent"\]\s+\.bme-agent-mode-only/,
 );
 
 for (const workflowControl of [

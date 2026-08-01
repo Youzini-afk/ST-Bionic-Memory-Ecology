@@ -162,11 +162,12 @@ function buildColdRuntime(document, { failFirstInit = false } = {}) {
   let panelModule;
   let themesModule;
   let settings = {};
-  const calls = { importedPanel: 0, importedThemes: 0, initialized: 0, opened: 0 };
+  const calls = { importedPanel: 0, importedThemes: 0, initialized: 0, opened: 0, initOptions: null };
   const importedPanelModule = {
     openPanel: () => { calls.opened += 1; },
-    initPanel: async () => {
+    initPanel: async (options) => {
       calls.initialized += 1;
+      calls.initOptions = options;
       if (!document.getElementById("st-bme-panel-overlay")) {
         const overlay = appendElement(document, document.body, "div", { id: "st-bme-panel-overlay" });
         appendElement(document, overlay, "div", { id: "st-bme-panel" });
@@ -192,6 +193,7 @@ function buildColdRuntime(document, { failFirstInit = false } = {}) {
       return importedThemesModule;
     },
     getSettings: () => settings,
+    getAgentRunSnapshot: () => ({ activeCount: 0, runs: [] }),
     updateSettings: (patch) => {
       settings = { ...settings, ...patch };
       return settings;
@@ -259,6 +261,11 @@ const { initializePanelBridgeController } = await import("../ui/panel-bridge.js"
   assert.equal(runtime.calls.importedPanel, 1, "concurrent bridge callers share one panel import");
   assert.equal(runtime.calls.importedThemes, 1, "concurrent bridge callers share one theme import");
   assert.equal(runtime.calls.initialized, 1, "concurrent bridge callers share one panel initialization");
+  assert.equal(
+    runtime.calls.initOptions.getAgentRunSnapshot,
+    runtime.getAgentRunSnapshot,
+    "the bridge forwards the Agent run snapshot provider",
+  );
 }
 
 {

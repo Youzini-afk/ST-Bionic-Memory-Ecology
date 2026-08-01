@@ -161,6 +161,15 @@
           </div>
           <div class="bme-task-nav bme-task-nav-desktop">
             <button
+              class="bme-task-nav-btn bme-agent-mode-only"
+              data-task-section="agent"
+              type="button"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span data-i18n="panel.taskNav.agentFlow">Agent 执行流</span>
+              <span class="bme-task-nav-badge" id="bme-agent-run-badge" hidden>0</span>
+            </button>
+            <button
               class="bme-task-nav-btn active"
               data-task-section="pipeline"
               type="button"
@@ -3658,6 +3667,7 @@
           </div>
 
           <div class="bme-task-nav-mobile" id="bme-task-nav-mobile">
+            <button class="bme-task-nav-pill bme-agent-mode-only" data-task-section="agent" type="button" data-i18n="panel.mobileNav.agentFlow">Agent</button>
             <button class="bme-task-nav-pill active" data-task-section="pipeline" type="button" data-i18n="panel.mobileNav.pipeline">管线</button>
             <button class="bme-task-nav-pill" data-task-section="timeline" type="button" data-i18n="panel.mobileNav.timeline">流水</button>
             <button class="bme-task-nav-pill" data-task-section="memory" type="button" data-i18n="panel.mobileNav.memory">记忆</button>
@@ -3667,6 +3677,7 @@
           </div>
 
           <div class="bme-task-workspace-body">
+            <div class="bme-task-section" data-task-section="agent" id="bme-task-agent"></div>
             <div class="bme-task-section active" data-task-section="pipeline" id="bme-task-pipeline"></div>
             <div class="bme-task-section" data-task-section="timeline" id="bme-task-timeline"></div>
             <div class="bme-task-section" data-task-section="memory" id="bme-task-memory"></div>

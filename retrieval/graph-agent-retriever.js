@@ -369,7 +369,7 @@ export async function retrieveWithGraphAgent({
         runId,
         outcome: {
           kind: String(outcome.kind || "fallback"),
-          completed: false,
+          completed: true,
           fallback: true,
           reason: String(runError?.message || "missing-agent-publication"),
           selectedMemoryCount: Array.isArray(packet.initialSelectedMemoryIds)

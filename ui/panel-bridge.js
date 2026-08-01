@@ -234,6 +234,7 @@ async function initializePanelBridge(runtime) {
     getLastRecallStatus: runtime.getLastRecallStatus,
     getLastBatchStatus: runtime.getLastBatchStatus,
     getLastInjection: runtime.getLastInjection,
+    getAgentRunSnapshot: runtime.getAgentRunSnapshot,
     getRuntimeDebugSnapshot: runtime.getRuntimeDebugSnapshot,
     getGraphPersistenceState: runtime.getGraphPersistenceState,
     getHideStateSnapshot: runtime.getHideStateSnapshot,

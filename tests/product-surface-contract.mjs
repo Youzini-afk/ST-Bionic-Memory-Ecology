@@ -24,6 +24,7 @@ const requiredPanelIds = [
   "bme-pane-config",
   "bme-pane-graph",
   "bme-task-workspace",
+  "bme-task-agent",
   "bme-graph-canvas",
   "bme-cognition-workspace",
   "bme-summary-workspace",
@@ -98,7 +99,7 @@ for (const section of ["api", "toggles", "advanced", "prompts", "planner", "appe
   );
 }
 
-for (const section of ["pipeline", "timeline", "memory", "injection", "trace", "persistence"]) {
+for (const section of ["agent", "pipeline", "timeline", "memory", "injection", "trace", "persistence"]) {
   assert.ok(
     panelHtml.includes(`data-task-section="${section}"`),
     `missing task workspace ${section}`,

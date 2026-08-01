@@ -78,6 +78,7 @@ import {
   uiTypeLabel,
 } from "./ui-label-formatter.js";
 import { reportPanelGraphLoadFailure } from "./ui-status.js";
+import { createAgentRunViewController } from "./agent-run-view.js";
 
 let defaultPromptCache = null;
 
@@ -355,6 +356,7 @@ let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "toggles";
 let currentTaskSectionId = "pipeline";
+let taskSectionUserSelected = false;
 let currentSelectedMemoryNodeId = "";
 let taskMemorySearchDraft = _createTaskMemorySearchState();
 let taskMemorySearchApplied = _createTaskMemorySearchState();
@@ -392,6 +394,7 @@ let lastVisibleGraphRefreshAt = 0;
 let lastGraphTransientHighlightSignature = "";
 let lastGraphTransientHighlightRenderer = null;
 let graphRenderingEnabled = true;
+let agentRunViewController = null;
 
 function _isPluginEnabled(settings = _getSettings?.() || {}) {
   return settings?.enabled !== false;
@@ -424,6 +427,7 @@ let _getLastExtractionStatus = null;
 let _getLastVectorStatus = null;
 let _getLastRecallStatus = null;
 let _getLastInjection = null;
+let _getAgentRunSnapshot = null;
 let _getRuntimeDebugSnapshot = null;
 let _getGraphPersistenceState = null;
 let _getHideStateSnapshot = null;
@@ -1194,6 +1198,7 @@ export async function initPanel({
   getLastVectorStatus,
   getLastRecallStatus,
   getLastInjection,
+  getAgentRunSnapshot,
   getRuntimeDebugSnapshot,
   getGraphPersistenceState,
   getHideStateSnapshot,
@@ -1210,6 +1215,7 @@ export async function initPanel({
   _getLastVectorStatus = getLastVectorStatus;
   _getLastRecallStatus = getLastRecallStatus;
   _getLastInjection = getLastInjection;
+  _getAgentRunSnapshot = getAgentRunSnapshot;
   _getRuntimeDebugSnapshot = getRuntimeDebugSnapshot;
   _getGraphPersistenceState = getGraphPersistenceState;
   _getHideStateSnapshot = getHideStateSnapshot;
@@ -1248,6 +1254,12 @@ export async function initPanel({
   _bindDashboardControls();
   _bindConfigControls();
   _bindTaskNavigation();
+  agentRunViewController = createAgentRunViewController({
+    root: document.getElementById("bme-task-agent"),
+    getSnapshot: () => _getAgentRunSnapshot?.() || { runs: [], activeCount: 0 },
+    cancelRun: async (runId) => await _actionHandlers.cancelAgentRun?.(runId),
+    onError: (message) => toastr.error(message, t("panel.agentFlow.title")),
+  });
   _bindPlannerLauncher();
   currentTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
@@ -1263,6 +1275,8 @@ export function updatePanelLocale(localeMode = "auto") {
   _applyPanelLocale({ ...(_getSettings?.() || {}), uiLocale: localeMode });
   _refreshRuntimeStatus();
   _syncFloatingBallWithRuntimeStatus();
+  if (currentTaskSectionId === "agent") _syncTaskSectionState();
+  agentRunViewController?.reset?.();
   _getActiveGraphRenderer()?._render?.();
 }
 
@@ -1725,6 +1739,7 @@ function _applyWorkspaceMode() {
 // ==================== 任务监控工作区 ====================
 
 const TASK_SECTION_META = {
+  agent: { kickerKey: "panel.agentFlow.kicker", titleKey: "panel.agentFlow.title", descKey: "panel.agentFlow.desc" },
   pipeline: { kicker: "管线总览", title: "管线总览", desc: "实时查看所有任务管线的运行状态与当前批次进度。" },
   timeline: { kicker: "任务流水", title: "任务流水", desc: "按时间轴追踪每次提取、召回、向量索引等任务的执行记录。" },
   memory: { kicker: "记忆浏览", title: "记忆浏览", desc: "浏览和检索图谱中的所有记忆节点。" },
@@ -1750,6 +1765,7 @@ function _bindTaskNavigation() {
 
 function _switchTaskSection(sectionId) {
   currentTaskSectionId = sectionId || "pipeline";
+  taskSectionUserSelected = true;
   _closeMemoryPopup();
   _syncTaskSectionState();
   _refreshTaskMonitor();
@@ -1769,13 +1785,35 @@ function _syncTaskSectionState() {
   const kicker = document.getElementById("bme-task-ws-kicker");
   const title = document.getElementById("bme-task-ws-title");
   const desc = document.getElementById("bme-task-ws-desc");
-  if (kicker) kicker.textContent = meta.kicker;
-  if (title) title.textContent = meta.title;
-  if (desc) desc.textContent = meta.desc;
+  if (kicker) kicker.textContent = meta.kickerKey ? t(meta.kickerKey) : meta.kicker;
+  if (title) title.textContent = meta.titleKey ? t(meta.titleKey) : meta.title;
+  if (desc) desc.textContent = meta.descKey ? t(meta.descKey) : meta.desc;
 }
 
 function _refreshTaskMonitor() {
+  const agentMode = String(_getSettings?.()?.memoryRuntimeMode || "workflow") === "agent";
+  const agentSnapshot = agentMode
+    ? _getAgentRunSnapshot?.() || { runs: [], activeCount: 0 }
+    : { runs: [], activeCount: 0 };
+  if (panelEl) panelEl.dataset.memoryRuntimeMode = agentMode ? "agent" : "workflow";
+  const agentBadge = document.getElementById("bme-agent-run-badge");
+  const activeAgentRuns = Math.max(0, Number(agentSnapshot.activeCount || 0));
+  if (agentBadge) {
+    agentBadge.textContent = String(activeAgentRuns);
+    agentBadge.hidden = !agentMode || activeAgentRuns === 0;
+  }
+  if (!agentMode && currentTaskSectionId === "agent") {
+    currentTaskSectionId = "pipeline";
+    taskSectionUserSelected = false;
+    _syncTaskSectionState();
+  } else if (agentMode && !taskSectionUserSelected && currentTaskSectionId === "pipeline" && activeAgentRuns > 0) {
+    currentTaskSectionId = "agent";
+    _syncTaskSectionState();
+  }
   switch (currentTaskSectionId) {
+    case "agent":
+      agentRunViewController?.refresh?.({ snapshot: agentSnapshot });
+      break;
     case "pipeline":
       _refreshTaskPipelineOverview();
       break;

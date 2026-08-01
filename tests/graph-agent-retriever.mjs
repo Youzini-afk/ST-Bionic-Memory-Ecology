@@ -206,6 +206,7 @@ assert.deepEqual(selected.meta.retrieval.agent.injectionPlan, {
   ],
 });
 
+const fallbackOutcomes = [];
 const fallback = await retrieveWithGraphAgent({
   graph,
   userMessage: "Where is the archive key?",
@@ -220,6 +221,7 @@ const fallback = await retrieveWithGraphAgent({
   resultBuilder,
   agentPromptBuilder,
   countTokens: () => 100,
+  observer: { recordOutcome: (entry) => fallbackOutcomes.push(entry) },
   model: async () => {
     throw new Error("provider unavailable");
   },
@@ -227,6 +229,8 @@ const fallback = await retrieveWithGraphAgent({
 
 assert.deepEqual(fallback.selectedNodeIds, ["memory:baseline"]);
 assert.equal(fallback.meta.retrieval.llm.status, "fallback");
+assert.equal(fallbackOutcomes.at(-1)?.outcome?.completed, true);
+assert.equal(fallbackOutcomes.at(-1)?.outcome?.fallback, true);
 assert.match(fallback.meta.retrieval.llm.reason, /程序召回/);
 
 await assert.rejects(
