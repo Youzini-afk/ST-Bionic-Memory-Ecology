@@ -36,7 +36,7 @@ assert.equal(englishStatus.meta, "Reading the IndexedDB graph for chat chat-1");
 assert.equal(getStageNoticeTitle("recall"), "ST-BME Recall");
 
 setLocale("zh-CN");
-assert.equal(getStageNoticeTitle("history"), "ST-BME 历史恢复");
+assert.equal(getStageNoticeTitle("history"), "ST-BME 楼层回滚");
 
 const originalToastr = globalThis.toastr;
 const originalConsoleError = console.error;
