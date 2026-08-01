@@ -15,13 +15,21 @@ export function resolveVisibleGraphWorkspaceMode({
         ? "mobile:summary"
         : "mobile:graph";
   }
-  if (currentTabId === "config") return "hidden";
+  if (currentTabId === "config" || currentTabId === "task") return "hidden";
   const desktopView = String(currentGraphView || "graph").trim() || "graph";
   return desktopView === "cognition"
     ? "desktop:cognition"
     : desktopView === "summary"
       ? "desktop:summary"
       : "desktop:graph";
+}
+
+export function shouldDeferVisibleGraphRefresh({
+  extractionRunning = false,
+  final = false,
+  hard = false,
+} = {}) {
+  return extractionRunning === true && final !== true && hard !== true;
 }
 
 export function buildVisibleGraphRefreshToken({

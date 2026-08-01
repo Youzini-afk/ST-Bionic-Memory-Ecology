@@ -1123,7 +1123,7 @@
   padding: 14px 18px 24px;
   overflow: auto;
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .bme-agent-timeline::before {

@@ -6,6 +6,7 @@ import {
   classifyGraphRefresh,
   createGraphRefreshGovernor,
   resolveVisibleGraphWorkspaceMode,
+  shouldDeferVisibleGraphRefresh,
 } from "../ui/panel-graph-refresh-utils.js";
 
 assert.equal(
@@ -16,6 +17,25 @@ assert.equal(
     currentGraphView: "graph",
   }),
   "hidden",
+);
+
+assert.equal(
+  resolveVisibleGraphWorkspaceMode({
+    overlayActive: true,
+    isMobile: false,
+    currentTabId: "task",
+    currentGraphView: "graph",
+  }),
+  "hidden",
+);
+
+assert.equal(
+  shouldDeferVisibleGraphRefresh({ extractionRunning: true }),
+  true,
+);
+assert.equal(
+  shouldDeferVisibleGraphRefresh({ extractionRunning: true, final: true }),
+  false,
 );
 
 assert.equal(

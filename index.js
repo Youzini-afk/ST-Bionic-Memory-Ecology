@@ -18155,6 +18155,11 @@ async function onCompactLukerSidecar() {
     actions: {
       getPlannerApi: () => enaPlannerApi,
       syncGraphLoad: async () => {
+        if (
+          conversationWorkspace.isExtracting ||
+          isHistoryRecoveryBusy() ||
+          agentRunMonitor.hasActiveRun({ chatId: getCurrentChatId() })
+        ) return { skipped: true, reason: "runtime-busy" };
         const refreshPlan = buildPanelOpenLocalStoreRefreshPlan();
         if (refreshPlan.shouldRefresh) {
           await refreshCurrentChatLocalStoreBinding({
@@ -18249,8 +18254,10 @@ async function onCompactLukerSidecar() {
     getLastRecallStatus: () => conversationWorkspace.lastRecallStatus,
     getLastVectorStatus: () => conversationWorkspace.lastVectorStatus,
     getAgentRunSnapshot: (options = {}) =>
-      agentRunMonitor.getSnapshot({
+      agentRunMonitor.getUiSnapshot({
         chatId: options?.includeAll === true ? "" : String(getCurrentChatId() || ""),
+        detailRunId: options?.detailRunId,
+        maxRuns: options?.maxRuns,
       }),
     getPanelModule: () => _panelModule,
     getRuntimeDebugSnapshot: (options = {}) =>

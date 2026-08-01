@@ -124,6 +124,34 @@ function publicRun(run, cancellable) {
   };
 }
 
+function publicUiRun(run, cancellable, includeDetails, maxEvents) {
+  const eventCount = Array.isArray(run.events) ? run.events.length : 0;
+  const eventLimit = Math.max(1, Math.floor(Number(maxEvents) || 480));
+  const stream = run.stream
+    ? {
+        ...run.stream,
+        content: includeDetails ? run.stream.content : "",
+        reasoningContent: includeDetails ? run.stream.reasoningContent : "",
+        toolCalls: includeDetails
+          ? (run.stream.toolCalls || []).map((call) => ({ ...call }))
+          : [],
+      }
+    : null;
+  return {
+    ...run,
+    eventIds: undefined,
+    usage: { ...run.usage },
+    metadata: { ...run.metadata },
+    activeTool: includeDetails && run.activeTool ? { ...run.activeTool } : null,
+    substage: includeDetails && run.substage ? { ...run.substage } : null,
+    outcome: includeDetails ? run.outcome : null,
+    stream,
+    events: includeDetails ? run.events.slice(-eventLimit) : [],
+    omittedEventCount: includeDetails ? Math.max(0, eventCount - eventLimit) : eventCount,
+    cancellable: Boolean(cancellable && !run.terminal),
+  };
+}
+
 function runReceipt(run, cancellable) {
   return run
     ? {
@@ -375,6 +403,49 @@ export class AgentRunMonitor {
       activeCount: runs.filter((run) => !run.terminal).length,
       runs,
     };
+  }
+
+  getUiSnapshot({ chatId = "", detailRunId = "", maxRuns = 24, maxEvents = 480 } = {}) {
+    const normalizedChatId = String(chatId || "").trim();
+    const sorted = [...this.runs.values()]
+      .filter((run) => !normalizedChatId || run.chatId === normalizedChatId)
+      .sort((left, right) => {
+        if (left.terminal !== right.terminal) return left.terminal ? 1 : -1;
+        return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
+      });
+    const activeCount = sorted.filter((run) => !run.terminal).length;
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(maxRuns) || 24)));
+    const requestedDetailId = String(detailRunId || "").trim();
+    const detailRun =
+      sorted.find((run) => run.runId === requestedDetailId) ||
+      sorted.find((run) => !run.terminal) ||
+      sorted[0] ||
+      null;
+    const visible = sorted.slice(0, limit);
+    if (detailRun && !visible.includes(detailRun)) visible.push(detailRun);
+    return {
+      revision: this.revision,
+      updatedAt: this.updatedAt,
+      activeCount,
+      detailRunId: detailRun?.runId || "",
+      runs: visible.map((run) =>
+        publicUiRun(
+          run,
+          this.controls.has(run.runId),
+          run === detailRun,
+          maxEvents,
+        ),
+      ),
+    };
+  }
+
+  hasActiveRun({ chatId = "" } = {}) {
+    const normalizedChatId = String(chatId || "").trim();
+    return [...this.runs.values()].some(
+      (run) =>
+        !run.terminal &&
+        (!normalizedChatId || run.chatId === normalizedChatId),
+    );
   }
 
   #touch(runId, type) {

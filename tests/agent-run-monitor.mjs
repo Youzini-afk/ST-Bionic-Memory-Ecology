@@ -169,7 +169,63 @@ async function testCancellationByRunId() {
   assert.equal(monitor.cancel("run-monitor-cancel").ok, false);
 }
 
+function testUiSnapshotIsBoundedAndAvoidsDeepClone() {
+  let tick = 1_000;
+  const monitor = new AgentRunMonitor({ now: () => ++tick });
+  for (let runIndex = 0; runIndex < 3; runIndex += 1) {
+    const runId = `run-ui-${runIndex}`;
+    monitor.recordEvent({
+      id: `${runId}:start`,
+      runId,
+      chatId: "chat:ui-projection",
+      eventType: "run_started",
+      createdAt: tick + runIndex,
+      payload: { metadata: { taskType: "agent_steward" } },
+    });
+    for (let eventIndex = 0; eventIndex < 30; eventIndex += 1) {
+      monitor.recordEvent({
+        id: `${runId}:event:${eventIndex}`,
+        runId,
+        chatId: "chat:ui-projection",
+        eventType: "context_compacted",
+        createdAt: tick + eventIndex,
+        payload: { beforeTokens: 100, afterTokens: 50 },
+      });
+    }
+  }
+
+  const originalStructuredClone = globalThis.structuredClone;
+  let cloneCalls = 0;
+  globalThis.structuredClone = (...args) => {
+    cloneCalls += 1;
+    return originalStructuredClone(...args);
+  };
+  try {
+    const snapshot = monitor.getUiSnapshot({
+      chatId: "chat:ui-projection",
+      detailRunId: "run-ui-0",
+      maxRuns: 2,
+      maxEvents: 12,
+    });
+    assert.equal(cloneCalls, 0, "panel projection must not deep-clone run history");
+    assert.equal(snapshot.detailRunId, "run-ui-0");
+    assert.equal(snapshot.runs.length, 3, "selected history stays accessible outside the recent window");
+    const detailed = snapshot.runs.find((run) => run.runId === "run-ui-0");
+    assert.equal(detailed.events.length, 12);
+    assert.equal(detailed.omittedEventCount, 19);
+    assert.ok(
+      snapshot.runs
+        .filter((run) => run.runId !== "run-ui-0")
+        .every((run) => run.events.length === 0),
+    );
+    assert.equal(monitor.hasActiveRun({ chatId: "chat:ui-projection" }), true);
+  } finally {
+    globalThis.structuredClone = originalStructuredClone;
+  }
+}
+
 await testLiveProjectionAndTerminalHistory();
 await testCancellationByRunId();
+testUiSnapshotIsBoundedAndAvoidsDeepClone();
 
 console.log("Agent run monitor tests passed");

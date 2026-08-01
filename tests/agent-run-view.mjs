@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { setLocale } from "../i18n/index.js";
-import { buildAgentRunTimeline } from "../ui/agent-run-view.js";
+import {
+  buildAgentEntryRenderSignature,
+  buildAgentRunTimeline,
+} from "../ui/agent-run-view.js";
 
 setLocale("en-US");
 
@@ -138,6 +141,63 @@ function event(id, eventType, payload = {}) {
   });
   assert.equal(timeline.at(-1).status, "completed");
   assert.match(timeline.at(-1).title, /Fallback completed/);
+}
+
+{
+  const longText = "0123456789".repeat(20);
+  const timeline = buildAgentRunTimeline(
+    {
+      runId: "run-windowed",
+      events: Array.from({ length: 200 }, (_, index) =>
+        event(`compact-${index}`, "context_compacted", {
+          beforeTokens: index + 10,
+          afterTokens: index + 5,
+        }),
+      ),
+      stream: {
+        active: true,
+        requestNumber: 3,
+        content: longText,
+        reasoningContent: longText,
+      },
+    },
+    {
+      maxEntries: 20,
+      contentCharLimit: 40,
+      reasoningCharLimit: 30,
+    },
+  );
+  assert.equal(timeline.length, 21);
+  assert.match(timeline[0].title, /earlier entries collapsed/);
+  const live = timeline.at(-1);
+  assert.ok(live.content.length < longText.length);
+  assert.ok(live.content.endsWith(longText.slice(-40)));
+  assert.ok(live.reasoning.endsWith(longText.slice(-30)));
+}
+
+{
+  const timeline = buildAgentRunTimeline({
+    runId: "run-monitor-window",
+    omittedEventCount: 80,
+    events: [event("compact-tail", "context_compacted")],
+  });
+  assert.equal(timeline.length, 2);
+  assert.match(timeline[0].title, /80 earlier entries collapsed/);
+}
+
+{
+  const hugeDiagnostic = `do-not-sign-${"x".repeat(50_000)}`;
+  const signature = buildAgentEntryRenderSignature({
+    id: "tool-large",
+    kind: "tool",
+    status: "completed",
+    title: "Large tool",
+    description: "Completed",
+    arguments: hugeDiagnostic,
+    result: hugeDiagnostic,
+  });
+  assert.ok(signature.length < 200);
+  assert.doesNotMatch(signature, /do-not-sign/);
 }
 
 console.log("Agent run view tests passed");

@@ -41,6 +41,10 @@ const TERMINAL_TYPES = new Set([
   "run_failed",
   "run_cancelled",
 ]);
+const UI_TIMELINE_ENTRY_LIMIT = 120;
+const UI_TOOL_GROUP_ITEM_LIMIT = 24;
+const UI_MODEL_CONTENT_CHAR_LIMIT = 12_000;
+const UI_REASONING_CHAR_LIMIT = 6_000;
 
 function esc(value) {
   return String(value ?? "")
@@ -75,6 +79,15 @@ function pretty(value) {
   } catch {
     return text;
   }
+}
+
+function clipAgentText(value, maxChars = 0) {
+  const text = String(value || "");
+  const limit = Math.max(0, Math.floor(Number(maxChars) || 0));
+  if (!limit || text.length <= limit) return text;
+  return `${t("panel.agentFlow.previewClipped", {
+    count: text.length - limit,
+  })}\n${text.slice(-limit)}`;
 }
 
 function toolName(toolCall = {}) {
@@ -260,7 +273,9 @@ function normalizeToolEntry(started, finished = null) {
   };
 }
 
-export function buildAgentRunTimeline(run = {}) {
+export function buildAgentRunTimeline(run = {}, options = {}) {
+  const contentLimit = Number(options.contentCharLimit) || 0;
+  const reasoningLimit = Number(options.reasoningCharLimit) || 0;
   const entries = [];
   const modelsByRequestEventId = new Map();
   const toolsByNumber = new Map();
@@ -301,8 +316,8 @@ export function buildAgentRunTimeline(run = {}) {
       const entry = modelsByRequestEventId.get(String(payload.requestEventId || ""));
       if (entry) {
         entry.status = "completed";
-        entry.content = String(payload?.message?.content || "");
-        entry.reasoning = String(payload.reasoningContent || "");
+        entry.content = clipAgentText(payload?.message?.content, contentLimit);
+        entry.reasoning = clipAgentText(payload.reasoningContent, reasoningLimit);
         entry.toolCalls = Array.isArray(payload?.message?.tool_calls)
           ? payload.message.tool_calls.map((call) => ({
               id: String(call?.id || ""),
@@ -317,7 +332,7 @@ export function buildAgentRunTimeline(run = {}) {
       const entry = modelsByRequestEventId.get(String(payload.requestEventId || ""));
       if (entry) {
         entry.status = "completed";
-        entry.content = String(payload.summary || "");
+        entry.content = clipAgentText(payload.summary, contentLimit);
       }
       continue;
     }
@@ -388,8 +403,8 @@ export function buildAgentRunTimeline(run = {}) {
     }
     Object.assign(entry, {
       status: "streaming",
-      content: String(run.stream.content || ""),
-      reasoning: String(run.stream.reasoningContent || ""),
+      content: clipAgentText(run.stream.content, contentLimit),
+      reasoning: clipAgentText(run.stream.reasoningContent, reasoningLimit),
       toolCalls: Array.isArray(run.stream.toolCalls) ? run.stream.toolCalls : [],
     });
   }
@@ -411,10 +426,26 @@ export function buildAgentRunTimeline(run = {}) {
     }
   }
 
-  return groupConsecutiveTools(entries);
+  const grouped = groupConsecutiveTools(entries, {
+    maxGroupItems: options.maxToolGroupItems,
+  });
+  const maxEntries = Math.max(0, Math.floor(Number(options.maxEntries) || 0));
+  const omittedByLimit = maxEntries ? Math.max(0, grouped.length - maxEntries) : 0;
+  const omitted = Math.max(0, Number(run.omittedEventCount) || 0) + omittedByLimit;
+  if (!omitted) return grouped;
+  return [
+    {
+      id: `window:${run.runId || "run"}`,
+      kind: "marker",
+      status: "completed",
+      title: t("panel.agentFlow.event.olderCollapsed", { count: omitted }),
+    },
+    ...(omittedByLimit ? grouped.slice(-maxEntries) : grouped),
+  ];
 }
 
-function groupConsecutiveTools(entries) {
+function groupConsecutiveTools(entries, { maxGroupItems = 0 } = {}) {
+  const itemLimit = Math.max(0, Math.floor(Number(maxGroupItems) || 0));
   const grouped = [];
   for (const entry of entries) {
     const previous = grouped.at(-1);
@@ -434,7 +465,9 @@ function groupConsecutiveTools(entries) {
           previous.status === "failed" || entry.status === "failed"
             ? "failed"
             : "completed",
-        items: [previous, entry],
+        items: itemLimit ? [previous, entry].slice(-itemLimit) : [previous, entry],
+        totalCount: 2,
+        omittedCount: itemLimit ? Math.max(0, 2 - itemLimit) : 0,
       });
     } else if (
       entry.kind === "tool" &&
@@ -442,7 +475,12 @@ function groupConsecutiveTools(entries) {
       previous?.kind === "tool-group" &&
       previous.name === entry.name
     ) {
+      previous.totalCount = Number(previous.totalCount || previous.items.length) + 1;
       previous.items.push(entry);
+      if (itemLimit && previous.items.length > itemLimit) {
+        previous.items.splice(0, previous.items.length - itemLimit);
+        previous.omittedCount = previous.totalCount - previous.items.length;
+      }
       if (entry.status === "failed") previous.status = "failed";
     } else {
       grouped.push(entry);
@@ -462,6 +500,7 @@ function renderDiagnostics(diagnosticId, { hasArguments = false, hasResult = fal
 
 function renderEntry(entry) {
   if (entry.kind === "tool-group") {
+    const totalCount = Number(entry.totalCount || entry.items.length);
     const details = entry.items
       .map((item, index) => `
         <div class="bme-agent-tool-group__item">
@@ -476,9 +515,10 @@ function renderEntry(entry) {
     return `
       <div class="bme-agent-entry__icon"><i class="fa-solid fa-screwdriver-wrench"></i></div>
       <div class="bme-agent-entry__body">
-        <div class="bme-agent-entry__title">${esc(entry.title)} <span class="bme-agent-entry__count">×${entry.items.length}</span></div>
+        <div class="bme-agent-entry__title">${esc(entry.title)} <span class="bme-agent-entry__count">×${totalCount}</span></div>
         <details class="bme-agent-tool-group"${entry.status === "failed" ? " open" : ""}>
-          <summary>${esc(t("panel.agentFlow.groupedCalls", { count: entry.items.length }))}</summary>
+          <summary>${esc(t("panel.agentFlow.groupedCalls", { count: totalCount }))}</summary>
+          ${entry.omittedCount ? `<div class="bme-agent-entry__text">${esc(t("panel.agentFlow.groupedCallsClipped", { count: entry.omittedCount }))}</div>` : ""}
           ${details}
         </details>
       </div>`;
@@ -515,6 +555,54 @@ function renderEntry(entry) {
       ${entry.description ? `<div class="bme-agent-entry__text">${esc(entry.description)}</div>` : ""}
       ${entry.details ? renderDiagnostics(entry.id, { hasResult: true }) : ""}
     </div>`;
+}
+
+export function buildAgentEntryRenderSignature(entry = {}) {
+  if (entry.kind === "tool-group") {
+    return JSON.stringify([
+      entry.kind,
+      entry.status,
+      entry.title,
+      entry.totalCount || entry.items?.length || 0,
+      ...(entry.items || []).flatMap((item) => [
+        item.id,
+        item.status,
+        item.description,
+        Boolean(item.arguments),
+        Boolean(item.result),
+      ]),
+    ]);
+  }
+  if (entry.kind === "tool") {
+    return JSON.stringify([
+      entry.kind,
+      entry.id,
+      entry.status,
+      entry.title,
+      entry.description,
+      Boolean(entry.arguments),
+      Boolean(entry.result),
+    ]);
+  }
+  if (entry.kind === "model") {
+    return JSON.stringify([
+      entry.kind,
+      entry.id,
+      entry.status,
+      entry.title,
+      entry.content,
+      entry.reasoning,
+      (entry.toolCalls || []).map((call) => toolName(call)),
+    ]);
+  }
+  return JSON.stringify([
+    entry.kind,
+    entry.id,
+    entry.status,
+    entry.title,
+    entry.description,
+    Boolean(entry.details),
+  ]);
 }
 
 function collectDiagnosticPayloads(entries) {
@@ -561,6 +649,7 @@ export function createAgentRunViewController({
   let lastRuns = [];
   const entryNodes = new Map();
   let diagnosticPayloads = new Map();
+  let timelineOrderSignature = "";
 
   function mountShell() {
     if (!root) return;
@@ -586,6 +675,7 @@ export function createAgentRunViewController({
     runStripSignature = "";
     entryNodes.clear();
     diagnosticPayloads.clear();
+    timelineOrderSignature = "";
   }
 
   function renderRunStrip(runs) {
@@ -646,7 +736,12 @@ export function createAgentRunViewController({
     if (!timeline) return;
     const nearBottom =
       timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 72;
-    const entries = buildAgentRunTimeline(run);
+    const entries = buildAgentRunTimeline(run, {
+      maxEntries: UI_TIMELINE_ENTRY_LIMIT,
+      maxToolGroupItems: UI_TOOL_GROUP_ITEM_LIMIT,
+      contentCharLimit: UI_MODEL_CONTENT_CHAR_LIMIT,
+      reasoningCharLimit: UI_REASONING_CHAR_LIMIT,
+    });
     diagnosticPayloads = collectDiagnosticPayloads(entries);
     const ids = new Set(entries.map((entry) => entry.id));
     for (const [id, node] of entryNodes) {
@@ -662,7 +757,7 @@ export function createAgentRunViewController({
         node.dataset.agentEntryId = entry.id;
         entryNodes.set(entry.id, node);
       }
-      const signature = JSON.stringify(entry);
+      const signature = buildAgentEntryRenderSignature(entry);
       if (node.dataset.signature !== signature) {
         const openDetails = [...(node.querySelectorAll?.("details[open]") || [])]
           .map((detail, index) =>
@@ -677,7 +772,13 @@ export function createAgentRunViewController({
           hydrateDiagnostic(detail);
         });
       }
-      timeline.appendChild(node);
+    }
+    const nextOrderSignature = entries.map((entry) => entry.id).join("|");
+    if (nextOrderSignature !== timelineOrderSignature) {
+      const fragment = document.createDocumentFragment();
+      for (const entry of entries) fragment.appendChild(entryNodes.get(entry.id));
+      timeline.appendChild(fragment);
+      timelineOrderSignature = nextOrderSignature;
     }
     if (nearBottom) timeline.scrollTop = timeline.scrollHeight;
   }
@@ -730,7 +831,8 @@ export function createAgentRunViewController({
   function refresh({ reset = false, snapshot: suppliedSnapshot = null } = {}) {
     if (!root || typeof getSnapshot !== "function") return;
     if (reset || !shellMounted) mountShell();
-    const snapshot = suppliedSnapshot || getSnapshot() || {};
+    const snapshot =
+      suppliedSnapshot || getSnapshot({ detailRunId: selectedRunId }) || {};
     const runs = Array.isArray(snapshot.runs) ? snapshot.runs : [];
     lastRuns = runs;
     if (!runs.some((run) => run.runId === selectedRunId)) {

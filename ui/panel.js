@@ -6,7 +6,9 @@ import {
   buildVisibleGraphRefreshToken,
   classifyGraphRefresh,
   resolveVisibleGraphWorkspaceMode,
+  shouldDeferVisibleGraphRefresh,
 } from "./panel-graph-refresh-utils.js";
+import { createPanelLiveRefreshScheduler, shouldRefreshPanelHeavyContent } from "./panel-live-refresh-scheduler.js";
 import { initPlannerSections, refreshPlannerSections } from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import { normalizeMemoryScope } from "../graph/memory-scope.js";
@@ -379,9 +381,7 @@ let viewportSyncBound = false;
 let popupRuntimePromise = null;
 const GRAPH_LIVE_REFRESH_THROTTLE_MS = 240;
 const GRAPH_EXTRACTION_REFRESH_THROTTLE_MS = 700;
-let _pendingRafRefreshId = null;
-let _lastRafRefreshAt = 0;
-const PANEL_LIVE_STATE_REFRESH_MIN_MS = 80;
+let panelLiveRefreshScheduler = null;
 let pendingVisibleGraphRefreshTimer = null;
 let pendingVisibleGraphRefreshToken = "";
 let pendingVisibleGraphRefreshFingerprint = "";
@@ -972,6 +972,9 @@ function _refreshVisibleGraphWorkspace({ force = false, final = false, hard = fa
     _refreshGraphLayoutDiagnosticsUi();
     return { refreshed: false, reason: "hidden" };
   }
+  if (shouldDeferVisibleGraphRefresh({
+    extractionRunning: _isExtractionUiRunning(), final, hard,
+  })) return { refreshed: false, reason: "extraction-running" };
 
   const graph = _getGraph?.();
   const nextToken = _getCurrentGraphRefreshToken();
@@ -1084,13 +1087,24 @@ function _flushScheduledVisibleGraphRefresh() {
 }
 
 function _scheduleVisibleGraphWorkspaceRefresh({ force = false, final = false, hard = false } = {}) {
-  const nextToken = _getCurrentGraphRefreshToken();
-  const nextFingerprint = _getCurrentGraphStructureFingerprint();
   const visibleMode = _getVisibleGraphWorkspaceMode();
-  if (nextToken === "hidden") {
+  if (visibleMode === "hidden") {
     _clearScheduledVisibleGraphRefresh();
     return { scheduled: false, reason: "hidden" };
   }
+  if (shouldDeferVisibleGraphRefresh({
+    extractionRunning: _isExtractionUiRunning(), final, hard,
+  })) {
+    _clearScheduledVisibleGraphRefresh();
+    return { scheduled: false, reason: "extraction-running" };
+  }
+  const nextToken = _getCurrentGraphRefreshToken();
+  if (!force && !final && !hard && nextToken === lastVisibleGraphRefreshToken) {
+    _clearScheduledVisibleGraphRefresh();
+    _syncGraphTransientHighlights({ visibleMode });
+    return { scheduled: false, reason: "unchanged", token: nextToken };
+  }
+  const nextFingerprint = _getCurrentGraphStructureFingerprint();
 
   const classification = classifyGraphRefresh({
     previousToken: lastVisibleGraphRefreshToken,
@@ -1256,9 +1270,16 @@ export async function initPanel({
   _bindTaskNavigation();
   agentRunViewController = createAgentRunViewController({
     root: document.getElementById("bme-task-agent"),
-    getSnapshot: () => _getAgentRunSnapshot?.() || { runs: [], activeCount: 0 },
+    getSnapshot: (options = {}) =>
+      _getAgentRunSnapshot?.({ maxRuns: 24, ...options }) ||
+      { runs: [], activeCount: 0 },
     cancelRun: async (runId) => await _actionHandlers.cancelAgentRun?.(runId),
     onError: (message) => toastr.error(message, t("panel.agentFlow.title")),
+  });
+  panelLiveRefreshScheduler = createPanelLiveRefreshScheduler({
+    refresh: _doRefreshLiveState,
+    isActive: () => overlayEl?.classList.contains("active") === true,
+    isBusy: _isExtractionUiRunning,
   });
   _bindPlannerLauncher();
   currentTabId =
@@ -1525,9 +1546,10 @@ export function openPanel() {
 
   const activeTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
-  _switchTab(activeTabId);
+  _switchTab(activeTabId, { refresh: false });
   _refreshRuntimeStatus();
   _buildLegend();
+  refreshLiveState({ deferInitial: true });
 }
 
 /**
@@ -1536,6 +1558,7 @@ export function openPanel() {
 export function closePanel() {
   if (!overlayEl) return;
   overlayEl.classList.remove("active");
+  panelLiveRefreshScheduler?.cancel?.();
   _closeMemoryPopup();
   _clearScheduledVisibleGraphRefresh();
   lastVisibleGraphRefreshToken = "";
@@ -1552,50 +1575,26 @@ export function updatePanelTheme(themeName) {
   _highlightThemeChoice(themeName);
 }
 
-export function refreshLiveState() {
-  if (!overlayEl?.classList.contains("active")) return;
-
-  const now = Date.now();
-  const elapsed = now - _lastRafRefreshAt;
-
-  if (elapsed < PANEL_LIVE_STATE_REFRESH_MIN_MS) {
-    if (!_pendingRafRefreshId) {
-      _pendingRafRefreshId = requestAnimationFrame(() => {
-        _pendingRafRefreshId = null;
-        _lastRafRefreshAt = Date.now();
-        _doRefreshLiveState();
-      });
-    }
-    return;
-  }
-
-  if (_pendingRafRefreshId) {
-    cancelAnimationFrame(_pendingRafRefreshId);
-    _pendingRafRefreshId = null;
-  }
-  _lastRafRefreshAt = now;
-  _doRefreshLiveState();
+export function refreshLiveState(options) {
+  panelLiveRefreshScheduler?.request?.(options);
 }
 
 function _doRefreshLiveState() {
-  _applyGraphRuntimeConfig(_getSettings?.() || {});
+  const settings = _getSettings?.() || {};
+  const extractionRunning = _isExtractionUiRunning();
+  const refreshHeavyContent = shouldRefreshPanelHeavyContent({ extractionRunning, tabId: currentTabId, taskSectionId: currentTaskSectionId });
+  _applyGraphRuntimeConfig(settings);
   _refreshRuntimeStatus();
-  _refreshNativeRolloutStatusUi(_getSettings?.() || {});
-  _refreshHideOldMessagesStatus(_getSettings?.() || {});
+  _refreshNativeRolloutStatusUi(settings);
+  _refreshHideOldMessagesStatus(settings);
 
-  switch (currentTabId) {
-    case "dashboard":
-      _refreshDashboard();
-      break;
-    case "task":
-      _refreshTaskMonitor();
-      break;
-    default:
-      break;
+  if (currentTabId === "dashboard" && refreshHeavyContent) _refreshDashboard();
+  else if (currentTabId === "task" && refreshHeavyContent) {
+    _refreshTaskMonitor();
   }
 
   if (
-    currentTabId === "config" &&
+    refreshHeavyContent && currentTabId === "config" &&
     currentConfigSectionId === "prompts" &&
     currentTaskProfileTabId === "debug"
   ) {
@@ -1658,7 +1657,7 @@ function _bindTabs() {
   });
 }
 
-function _switchTab(tabId) {
+function _switchTab(tabId, { refresh = true } = {}) {
   const previousVisibleGraphMode = _getVisibleGraphWorkspaceMode();
   let next = tabId || "dashboard";
   // 「图谱」仅移动端底部 Tab 可用；桌面端图谱在右侧主工作区，侧栏不设该 Tab
@@ -1677,6 +1676,7 @@ function _switchTab(tabId) {
   });
 
   _applyWorkspaceMode();
+  if (!refresh) return;
 
   switch (currentTabId) {
     case "dashboard":
@@ -1793,7 +1793,10 @@ function _syncTaskSectionState() {
 function _refreshTaskMonitor() {
   const agentMode = String(_getSettings?.()?.memoryRuntimeMode || "workflow") === "agent";
   const agentSnapshot = agentMode
-    ? _getAgentRunSnapshot?.() || { runs: [], activeCount: 0 }
+    ? _getAgentRunSnapshot?.({
+        detailRunId: agentRunViewController?.getSelectedRunId?.() || "",
+        maxRuns: 24,
+      }) || { runs: [], activeCount: 0 }
     : { runs: [], activeCount: 0 };
   if (panelEl) panelEl.dataset.memoryRuntimeMode = agentMode ? "agent" : "workflow";
   const agentBadge = document.getElementById("bme-agent-run-badge");
