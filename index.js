@@ -197,7 +197,8 @@ import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
-import { createHistoryRecoveryCoordinator } from "./runtime/history-recovery-coordinator.js";
+import { createHistoryRollbackCoordinatorRuntime } from "./runtime/history-recovery-coordinator.js";
+import { createRestoreLockController } from "./runtime/restore-lock-controller.js";
 import { createAgentRunMonitor } from "./runtime/agent-run-monitor.js";
 import { createAgentBackgroundPresentation, createMemoryTaskPresentationBindings } from "./runtime/task-presentation.js";
 import { runGraphStewardAgent } from "./application/graph-steward-agent.js";
@@ -998,111 +999,6 @@ function allocateRequestedPersistRevision(
   return Math.max(1, resolvePersistRevisionFloor(requestedRevision, graph) + 1);
 }
 
-let restoreLockOwnerSequence = 0;
-
-function normalizeRestoreLockState(lock = null) {
-  const source = String(lock?.source || "").trim();
-  const reason = String(lock?.reason || "").trim();
-  const startedAt = Number(lock?.startedAt);
-  const owners = Array.isArray(lock?.owners)
-    ? [...new Set(lock.owners.map((owner) => String(owner || "").trim()).filter(Boolean))]
-    : [];
-  const depth = Math.max(
-    owners.length,
-    Math.max(0, Math.floor(Number(lock?.depth) || 0)),
-  );
-  const active = lock?.active === true || depth > 0;
-  return {
-    active,
-    depth: active ? Math.max(1, depth || 1) : 0,
-    source,
-    reason,
-    startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : 0,
-    owners,
-  };
-}
-
-function isRestoreLockActive() {
-  return normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock).active;
-}
-
-function getRestoreLockMessage(operationLabel = "当前操作") {
-  const lock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
-  if (!lock.active) return "";
-  const details = [lock.reason, lock.source].filter(Boolean).join(" / ");
-  return `${operationLabel}已暂停：当前处于恢复锁${details ? `（${details}）` : ""}`;
-}
-
-function enterRestoreLock(source = "runtime", reason = "") {
-  const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
-  const owner = {
-    id: `restore-lock:${Date.now()}:${++restoreLockOwnerSequence}`,
-    source: String(source || currentLock.source || "runtime"),
-  };
-  const nextLock = {
-    active: true,
-    depth: currentLock.depth + 1,
-    source: owner.source,
-    reason: String(reason || currentLock.reason || ""),
-    startedAt: currentLock.startedAt || Date.now(),
-    owners: [...currentLock.owners, owner.id],
-  };
-  updateGraphPersistenceState({
-    restoreLock: nextLock,
-  });
-  return owner;
-}
-
-function leaveRestoreLock(ownerOrSource = "runtime") {
-  const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
-  if (!currentLock.active) {
-    return currentLock;
-  }
-  const ownerId =
-    ownerOrSource && typeof ownerOrSource === "object"
-      ? String(ownerOrSource.id || "").trim()
-      : "";
-  if (ownerId && !currentLock.owners.includes(ownerId)) {
-    return currentLock;
-  }
-  const nextOwners = ownerId
-    ? currentLock.owners.filter((candidate) => candidate !== ownerId)
-    : currentLock.owners;
-  const nextDepth = Math.max(0, currentLock.depth - 1);
-  const nextLock =
-    nextDepth > 0
-      ? {
-          ...currentLock,
-          depth: nextDepth,
-          source:
-            typeof ownerOrSource === "string"
-              ? String(ownerOrSource || currentLock.source || "")
-              : currentLock.source,
-          owners: nextOwners,
-        }
-      : {
-          active: false,
-          depth: 0,
-          source: "",
-          reason: "",
-          startedAt: 0,
-          owners: [],
-        };
-  updateGraphPersistenceState({
-    restoreLock: nextLock,
-  });
-  return cloneRuntimeDebugValue(nextLock, nextLock);
-}
-
-async function runWithRestoreLock(source, reason, task) {
-  const owner = enterRestoreLock(source, reason);
-  try {
-    return await task();
-  } finally {
-    leaveRestoreLock(owner);
-  }
-}
-
 function recordPersistMismatchDiagnostic(
   mismatch = null,
   { source = "persist-mismatch", resolvedBy = "" } = {},
@@ -1748,6 +1644,29 @@ const conversationWorkspace = createConversationWorkspace({
   createStatus: createInitialUiStatus,
   clearTimeout,
 });
+const restoreLockController = createRestoreLockController({
+  getLock: () => conversationWorkspace.graphPersistenceState.restoreLock,
+  setLock: (restoreLock) => updateGraphPersistenceState({ restoreLock }),
+});
+const normalizeRestoreLockState = restoreLockController.normalize;
+const isRestoreLockActive = restoreLockController.isActive;
+const getRestoreLockMessage = restoreLockController.getMessage;
+const enterRestoreLock = restoreLockController.enter;
+const leaveRestoreLock = restoreLockController.leave;
+const runWithRestoreLock = restoreLockController.runWith;
+const historyRollbackRuntime = createHistoryRollbackCoordinatorRuntime({
+  getWorkspace: () => conversationWorkspace,
+  getCurrentChatId,
+  abortActive: (reason) => abortStage("history", reason),
+  runAttempt: ({ trigger }, coordinator) =>
+    runHistoryRollbackAttempt(trigger, coordinator),
+});
+const isHistoryRecoveryBusy = historyRollbackRuntime.isBusy;
+const hasUncommittedHistoryRollback = historyRollbackRuntime.hasUncommitted;
+const getHistoryRecoveryCoordinator = historyRollbackRuntime.getCoordinator;
+const requestHistoryRollback = historyRollbackRuntime.request;
+const recoverHistoryIfNeeded = historyRollbackRuntime.recover;
+const awaitHistoryRollbackBarrier = historyRollbackRuntime.waitForBarrier;
 const agentRunMonitor = createAgentRunMonitor();
 const graphStewardWorkers = new Map();
 agentRunMonitor.subscribe(() => refreshPanelLiveState());
@@ -15553,58 +15472,6 @@ async function tryDeleteBackendVectorHashesForRecovery(
       clearTimeout(timeout);
     }
   }
-}
-
-function isHistoryRecoveryBusy() {
-  return Boolean(
-    conversationWorkspace.historyRecoveryCoordinator?.isBusy?.() ||
-      conversationWorkspace.isRecoveringHistory,
-  );
-}
-
-function hasUncommittedHistoryRollback() {
-  return Boolean(
-    isHistoryRecoveryBusy() ||
-      Number.isFinite(
-        conversationWorkspace.graph?.historyState?.historyDirtyFrom,
-      ),
-  );
-}
-
-function getHistoryRecoveryCoordinator() {
-  const existing = conversationWorkspace.historyRecoveryCoordinator;
-  if (existing) return existing;
-
-  let coordinator = null;
-  coordinator = createHistoryRecoveryCoordinator({
-    getCurrentChatId,
-    abortActive: (reason) => abortStage("history", reason),
-    runAttempt: ({ trigger }) =>
-      runHistoryRollbackAttempt(trigger, coordinator),
-  });
-  conversationWorkspace.historyRecoveryCoordinator = coordinator;
-  return coordinator;
-}
-
-function requestHistoryRollback(trigger = "history-change") {
-  return getHistoryRecoveryCoordinator().request(trigger, {
-    supersede: true,
-  });
-}
-
-async function recoverHistoryIfNeeded(trigger = "history-recovery") {
-  return await getHistoryRecoveryCoordinator().recover(trigger);
-}
-
-async function awaitHistoryRollbackBarrier() {
-  const coordinator = conversationWorkspace.historyRecoveryCoordinator;
-  if (coordinator) {
-    const settled = await coordinator.waitForCurrent();
-    if (settled !== true) return false;
-  }
-  return !Number.isFinite(
-    conversationWorkspace.graph?.historyState?.historyDirtyFrom,
-  );
 }
 
 async function runHistoryRollbackAttempt(

@@ -156,3 +156,65 @@ export function createHistoryRecoveryCoordinator({
     },
   };
 }
+
+export function createHistoryRollbackCoordinatorRuntime({
+  getWorkspace,
+  getCurrentChatId,
+  abortActive,
+  runAttempt,
+} = {}) {
+  if (typeof getWorkspace !== "function" || typeof runAttempt !== "function") {
+    throw new TypeError("HistoryRollbackCoordinatorRuntime requires workspace and attempt access");
+  }
+
+  const getCoordinator = () => {
+    const workspace = getWorkspace();
+    if (workspace.historyRecoveryCoordinator) {
+      return workspace.historyRecoveryCoordinator;
+    }
+    let coordinator = null;
+    coordinator = createHistoryRecoveryCoordinator({
+      getCurrentChatId,
+      abortActive,
+      runAttempt: (request) => runAttempt(request, coordinator),
+    });
+    workspace.historyRecoveryCoordinator = coordinator;
+    return coordinator;
+  };
+  const isBusy = () => {
+    const workspace = getWorkspace();
+    return Boolean(
+      workspace.historyRecoveryCoordinator?.isBusy?.() ||
+        workspace.isRecoveringHistory,
+    );
+  };
+  const hasUncommitted = () => {
+    const workspace = getWorkspace();
+    return Boolean(
+      isBusy() ||
+        Number.isFinite(workspace.graph?.historyState?.historyDirtyFrom),
+    );
+  };
+
+  return {
+    getCoordinator,
+    isBusy,
+    hasUncommitted,
+    request(trigger = "history-change") {
+      return getCoordinator().request(trigger, { supersede: true });
+    },
+    async recover(trigger = "history-recovery") {
+      return await getCoordinator().recover(trigger);
+    },
+    async waitForBarrier() {
+      const workspace = getWorkspace();
+      const coordinator = workspace.historyRecoveryCoordinator;
+      if (coordinator && (await coordinator.waitForCurrent()) !== true) {
+        return false;
+      }
+      return !Number.isFinite(
+        workspace.graph?.historyState?.historyDirtyFrom,
+      );
+    },
+  };
+}
