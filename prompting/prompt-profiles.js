@@ -825,18 +825,31 @@ function applyRuntimeDefaultTemplateOverrides(taskType, template = null) {
   return template;
 }
 
+// 性能缓存：默认任务模板与指纹只依赖模块级常量（DEFAULT_*_TEMPLATES / FALLBACK_DEFAULT_TASK_BLOCKS / PLANNER_*），
+// 运行时不会变化，因此按 taskType 缓存是安全的，无需失效（页面刷新即重置）。
+// 此前每次调用都全量深拷贝 + JSON.stringify + 逐字符 FNV 哈希，是提取/召回时主线程秒级卡顿的主因。
+// 注意：缓存对象按只读共享，调用方不得修改返回值（现有调用方均为只读）。
+const defaultTaskProfileTemplateCache = new Map();
+const defaultTaskProfileStampCache = new Map();
+
 function getDefaultTaskProfileTemplate(taskType) {
-  if (String(taskType || "") === "planner") {
-    return buildPlannerDefaultTaskProfileTemplate();
+  const cacheKey = String(taskType || "");
+  if (defaultTaskProfileTemplateCache.has(cacheKey)) {
+    return defaultTaskProfileTemplateCache.get(cacheKey);
   }
-  const templateKey = String(taskType || "");
-  const template =
-    DEFAULT_AGENT_TASK_PROFILE_TEMPLATES?.[templateKey] ||
-    DEFAULT_TASK_PROFILE_TEMPLATES?.[templateKey];
-  if (!template || typeof template !== "object") {
-    return null;
+  let template = null;
+  if (cacheKey === "planner") {
+    template = buildPlannerDefaultTaskProfileTemplate();
+  } else {
+    const source =
+      DEFAULT_AGENT_TASK_PROFILE_TEMPLATES?.[cacheKey] ||
+      DEFAULT_TASK_PROFILE_TEMPLATES?.[cacheKey];
+    if (source && typeof source === "object") {
+      template = applyRuntimeDefaultTemplateOverrides(cacheKey, cloneJson(source));
+    }
   }
-  return applyRuntimeDefaultTemplateOverrides(templateKey, cloneJson(template));
+  defaultTaskProfileTemplateCache.set(cacheKey, template);
+  return template;
 }
 
 function hashTemplateFingerprint(value = "") {
@@ -855,8 +868,12 @@ function getDefaultTaskProfileTemplateFingerprint(taskType) {
 }
 
 function getDefaultTaskProfileTemplateStamp(taskType) {
+  const cacheKey = String(taskType || "");
+  if (defaultTaskProfileStampCache.has(cacheKey)) {
+    return defaultTaskProfileStampCache.get(cacheKey);
+  }
   const template = getDefaultTaskProfileTemplate(taskType);
-  return {
+  const stamp = {
     version: Number.isFinite(Number(template?.version))
       ? Number(template.version)
       : DEFAULT_TASK_PROFILE_VERSION,
@@ -866,6 +883,8 @@ function getDefaultTaskProfileTemplateStamp(taskType) {
         : "",
     fingerprint: getDefaultTaskProfileTemplateFingerprint(taskType),
   };
+  defaultTaskProfileStampCache.set(cacheKey, stamp);
+  return stamp;
 }
 
 function buildDefaultTaskBlockTripletsFromTemplate(taskType) {
